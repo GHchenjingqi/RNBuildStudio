@@ -473,19 +473,19 @@ watch(buildExit, async (e) => {
 
       <el-card shadow="never">
         <template #header>构建日志</template>
-        <pre class="log" style="max-height: 420px; overflow: auto; margin: 0">{{
+        <pre class="log" style="margin: 0">{{
           buildLines.join('\n').trim() || (buildRunning ? '正在执行…' : '（暂无输出）')
         }}</pre>
       </el-card>
 
       <el-card v-if="hashStarted" shadow="never" style="margin-top: 16px">
         <template #header>产物校验值（SHA-256，可直接粘贴进升级清单）</template>
-        <pre class="log" style="max-height: 240px; overflow: auto; margin: 0">{{ hashLines.join('\n') }}</pre>
+        <pre class="log" style="margin: 0">{{ hashLines.join('\n') }}</pre>
       </el-card>
 
       <el-card v-if="installLines.length" shadow="never" style="margin-top: 16px">
         <template #header>装机日志</template>
-        <pre class="log" style="max-height: 300px; overflow: auto; margin: 0">{{ installLines.join('\n') }}</pre>
+        <pre class="log" style="margin: 0">{{ installLines.join('\n') }}</pre>
       </el-card>
     </template>
   </div>

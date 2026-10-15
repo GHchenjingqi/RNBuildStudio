@@ -13,17 +13,31 @@ const listeners = new Set<() => void>();
 let subscribed = false;
 let subscribing: Promise<void> | null = null;
 
+/** 每个任务日志缓冲的行数上限（tail）：gradle/hvigor 全量输出可达数万行，
+ *  不限会让 join + 渲染越来越卡，页面也被撑到无限长。完整日志在基座 log/ 目录。 */
+const MAX_LINES = 2000;
+
+/** 追加一行并按 MAX_LINES 截尾；超限时头部保留一条省略提示。 */
+function pushLine(taskId: string, line: string): void {
+  const buf = buffers.get(taskId);
+  if (!buf) return;
+  buf.push(line);
+  if (buf.length > MAX_LINES) {
+    buf.splice(0, buf.length - MAX_LINES);
+    if (!buf[0]?.startsWith('[日志过长')) {
+      buf.unshift('[日志过长，最早的输出已省略；完整日志见基座 log/ 目录]');
+    }
+  }
+}
+
 function notify(): void {
   listeners.forEach((fn) => fn());
 }
 
 async function doSubscribe(): Promise<void> {
   await api.onTaskLine((l) => {
-    const buf = buffers.get(l.taskId);
-    if (buf) {
-      buf.push(l.line);
-      notify();
-    }
+    if (buffers.has(l.taskId)) pushLine(l.taskId, l.line);
+    notify();
   });
   await api.onTaskExit((e) => {
     running.delete(e.taskId);

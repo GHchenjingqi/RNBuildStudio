@@ -87,7 +87,7 @@ async function runDoctor() {
 
     <el-card v-if="started" shadow="never" style="margin-top: 16px">
       <template #header>自检日志</template>
-      <pre class="log" style="max-height: 380px; overflow: auto; margin: 0"><span
+      <pre class="log" style="margin: 0"><span
         v-for="(l, i) in lines"
         :key="i"
         :class="lineClass(l)"

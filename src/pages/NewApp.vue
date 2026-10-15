@@ -313,8 +313,6 @@ async function runFollow(action: 'install' | 'build' | 'use') {
 
 <style scoped>
 .log {
-  max-height: 300px;
-  overflow: auto;
   margin: 0;
   padding: 10px;
   background: var(--el-fill-color-light);

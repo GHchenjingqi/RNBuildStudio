@@ -1,0 +1,12 @@
+/* 全局只有一条滚动条：滚动发生在 el-main（内容区），页面本身不滚。
+   body 默认 margin 8px 会把 100vh 容器顶出视口，长出第二条整页滚动条——必须清零。 */
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
