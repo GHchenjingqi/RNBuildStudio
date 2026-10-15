@@ -1,5 +1,7 @@
 # RNBuild Studio — RNbase 可视化打包工作台
 
+![RNBuild Studio banner](docs/banner.jpg)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24c8d8.svg)](https://tauri.app/)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883.svg)](https://vuejs.org/)
