@@ -198,6 +198,10 @@ async function saveAndApply() {
     ElMessage.success(`配置已保存到「${selectedApp.value}」，并已设为当前活动应用（构建将打它）`);
   } catch (e) {
     ElMessage.error(String(e));
+  } finally {
+    // 必须无条件复位：按钮 loading = saving || applyRunning，saving 原先只写在 catch 里，
+    // 成功路径永不复位 → 明明已提示保存成功，按钮却一直转圈。
+    // 任务真正在跑时由 applyRunning 撑住 loading，任务结束自动停。
     saving.value = false;
   }
 }
