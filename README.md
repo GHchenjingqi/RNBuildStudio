@@ -103,3 +103,10 @@ npm run exe        # = tauri build --no-bundle：构建前端 + release 编译�
   `version.json` / `res/` / `h5/` 等派生产物一律由基座脚本生成，GUI 不直写
 - 签名口令（`QUX_UPLOAD_*`）不进项目目录，后续版本走系统凭据库（Electron safeStorage 等价物：Tauri stronghold / OS keychain）
 - hdc 永远返回 0，鸿蒙装机状态必须解析输出而非看 exit code（构建脚本已按此口径，GUI 只透传日志）
+- **读子进程输出必须容错，不能中途放弃管道**：早期版本用
+  `BufReader::lines().map_while(Result::ok)` 转发日志，Windows 下 gradle / JDK 会吐
+  GBK 字节，`lines()` 遇到非法 UTF-8 返回 Err → `map_while` 直接结束循环 →
+  `ChildStdout` 被 drop → 管道读端关闭 → 基座侧 `gradle.js` 再写就是 EPIPE，
+  打包被打成「失败」（构建其实还在跑）。现改为 `read_until(b'\n')` +
+  `String::from_utf8_lossy`，读端活到子进程退出为止（见 `src-tauri/src/tasks.rs`
+  的 `pump_lines`）。对应基座侧也已加 EPIPE 兜底，断管不再打断构建。

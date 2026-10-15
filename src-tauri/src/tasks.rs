@@ -6,7 +6,7 @@
 //!  - 双击 exe 启动时不继承 shell 的 PATH，工具链路径由前端设置页注入 envs。
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -33,6 +33,36 @@ pub struct TaskExit {
     pub task_id: String,
     pub code: Option<i32>,
     pub success: bool,
+}
+
+/// 逐行泵送子进程输出；非 UTF-8 字节用 U+FFFD 替换，绝不因此中断读取。
+///
+/// 为什么不能直接 `BufReader::new(out).lines().map_while(Result::ok)`：
+/// Windows 下 gradle / JDK 会吐 GBK 字节，`lines()` 遇到非法 UTF-8 就返回 Err，
+/// `map_while(Result::ok)` 会**直接结束循环** → `ChildStdout` 被 drop → 管道读端
+/// 关闭 → 基座侧 gradle.js 再写就是 EPIPE，整个打包被打成「失败」（构建其实还在跑，
+/// 甚至已经跑完，只是没人收尾）。读端必须活到子进程退出为止。
+fn pump_lines<R: Read>(reader: R, mut emit: impl FnMut(String)) {
+    let mut reader = BufReader::new(reader);
+    loop {
+        let mut buf = Vec::new();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF：子进程结束
+            Ok(_) => {}
+            Err(e) => {
+                emit(format!("<读取输出失败：{e}>"));
+                break;
+            }
+        }
+        while let Some(&last) = buf.last() {
+            if last == b'\n' || last == b'\r' {
+                buf.pop();
+            } else {
+                break;
+            }
+        }
+        emit(String::from_utf8_lossy(&buf).into_owned());
+    }
 }
 
 /// 启动一个基座脚本任务。事件流：
@@ -77,12 +107,12 @@ pub fn run_task(
     let tid_out = task_id.clone();
     thread::spawn(move || {
         if let Some(out) = stdout {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
+            pump_lines(out, move |line| {
                 let _ = app_out.emit(
                     "task-line",
                     TaskLine { task_id: tid_out.clone(), stream: "stdout".into(), line },
                 );
-            }
+            });
         }
     });
 
@@ -90,12 +120,12 @@ pub fn run_task(
     let tid_err = task_id.clone();
     thread::spawn(move || {
         if let Some(err) = stderr {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
+            pump_lines(err, move |line| {
                 let _ = app_err.emit(
                     "task-line",
                     TaskLine { task_id: tid_err.clone(), stream: "stderr".into(), line },
                 );
-            }
+            });
         }
     });
 
