@@ -1,5 +1,14 @@
 # RNBuild Studio — RNbase 可视化打包工作台
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+[![Tauri 2](https://img.shields.io/badge/Tauri-2-24c8d8.svg)](https://tauri.app/)
+[![Vue 3](https://img.shields.io/badge/Vue-3-42b883.svg)](https://vuejs.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](./README.md)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/GHchenjingqi/RNBuildStudio/pulls)
+
+> **English** — A desktop build studio for the [RNbase](https://github.com/GHchenjingqi/RNbase) hybrid app shell: fill in a form, it calls the existing RNbase build scripts, streams logs, and hands you the APK / HAP. No command line needed.
+> 依赖的基座仓库：[**RNbase**](https://github.com/GHchenjingqi/RNbase)（RN + WebView + H5 混合架构基座）
+
 Tauri 2 + Vue3 + Element Plus 的桌面打包工具，面向不懂代码的使用者：表单收集参数 → 调用 [RNbase](https://github.com/GHchenjingqi/RNbase) 现有打包脚本 → 日志流展示 → 产物页。
 
 **核心原则：GUI 只做编排与参数收集，一切落盘动作走基座现有脚本**（`apply-app-meta.js` / `gradle.js` / `apk-hash.js`…），避免出现第二套打包逻辑漂移。
