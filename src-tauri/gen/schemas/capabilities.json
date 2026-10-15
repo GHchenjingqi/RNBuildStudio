@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"RNBuild Studio 默认权限：core:default 含 core:event:allow-listen，任务日志流（task-line / task-exit 事件）依赖它。缺这个文件时权限清单为空，前端 listen 会被拒——表现为「点了按钮任务在跑，但界面一行日志都没有、状态永远不结束」。","local":true,"windows":["main"],"permissions":["core:default"]}}

@@ -1,0 +1,26 @@
+{
+  "name": "rnbuild-studio",
+  "private": true,
+  "version": "0.1.0",
+  "description": "RNbase 可视化打包工作台（Tauri 2 + Vue3）：表单收集 + 脚本编排 + 日志流，一切落盘走基座现有脚本",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "exe": "tauri build --no-bundle",
+    "tauri:dev": "tauri dev",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "element-plus": "^2.8.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@vitejs/plugin-vue": "^5.1.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0",
+    "vue-tsc": "^2.1.0"
+  }
+}

@@ -1,0 +1,542 @@
+<script setup lang="ts">
+import { computed, ref, watch } from 'vue';
+import { ElMessage } from 'element-plus';
+import { settings } from '../lib/store';
+import { taskRunner, useTaskView } from '../lib/taskRunner';
+import { api } from '../lib/tauri';
+import type { AppConfig, AppHealth } from '../types';
+
+const step = ref(0);
+
+// ── 步骤 1：选平台（MVP 只放行安卓）──────────────────────────
+const platform = ref<'android' | 'harmony'>('android');
+
+/** 正式包 / 调试包：决定传给基座构建脚本的参数。 */
+const release = ref(false);
+
+/**
+ * 当前平台对应的构建参数。
+ * 与基座 package.json 的 npm scripts 一一对应，GUI 不发明新命令：
+ *   build:android         -> scripts/gradle.js assembleDebug
+ *   build:android:release -> scripts/gradle.js assembleRelease
+ *   build:harmony         -> scripts/hvigor.js assembleHap
+ *   build:harmony:release -> scripts/hvigor.js assembleHap --release
+ */
+function buildArgs(): string[] {
+  return platform.value === 'harmony'
+    ? release.value
+      ? ['scripts/hvigor.js', 'assembleHap', '--release']
+      : ['scripts/hvigor.js', 'assembleHap']
+    : release.value
+      ? ['scripts/gradle.js', 'assembleRelease']
+      : ['scripts/gradle.js', 'assembleDebug'];
+}
+
+/**
+ * 装机参数：安卓 installDebug，鸿蒙 assembleHap --install。
+ * 注意鸿蒙的 hdc 无论成功失败都返回 0，成功与否只能解析输出里的
+ * [Fail] / [Empty] 关键字（hvigor.js 已处理），这里不自行判断 exit code。
+ */
+function installArgs(): string[] {
+  return platform.value === 'harmony'
+    ? ['scripts/hvigor.js', 'assembleHap', '--install']
+    : ['scripts/gradle.js', 'installDebug'];
+}
+
+// ── 步骤 2：选模式 + 参数表单 ────────────────────────────────
+const mode = ref<'subapp' | 'remote'>('subapp');
+const apps = ref<string[]>([]);
+const health = ref<Record<string, AppHealth>>({});
+const activeApp = ref('');
+const selectedApp = ref('');
+const loadingApps = ref(false);
+const saving = ref(false);
+const removing = ref('');
+
+/** 目录与 app.config.json 都在才算可用；空值一律算不可用。
+ *  拿不到体检结果（老版本后端）时按可用处理，避免整个列表变灰。 */
+function usable(name: string): boolean {
+  if (!name) return false;
+  const h = health.value[name];
+  return h ? h.ok : true;
+}
+
+const usableApps = computed(() => apps.value.filter(usable));
+/** 悬空记录：目录被删/改名，或里面没有 app.config.json */
+const brokenApps = computed(() => apps.value.filter((n) => !usable(n)));
+
+function labelOf(name: string): string {
+  const suffix = name === activeApp.value ? '（当前活动）' : '';
+  return usable(name) ? name + suffix : `${name}（不可用：目录已丢失）${suffix}`;
+}
+
+const applyTaskId = 'apply-brand';
+const { lines: applyLines, running: applyRunning, exit: applyExit } = useTaskView(ref(applyTaskId));
+
+const form = ref<AppConfig>({
+  appName: '',
+  apkName: '',
+  applicationId: '',
+  versionName: '',
+  versionCode: 1,
+  splashBackgroundColor: '#08080D',
+  remoteUrl: '',
+  statusBarStyle: '',
+});
+
+/**
+ * 读取注册表 + 体检结果。
+ * 关键点：activeApp 可能指向一个已经被删掉目录的应用（用户删了目录又重建），
+ * 所以这里不能无条件沿用 activeApp，必须挑第一个真正可用的应用。
+ */
+async function loadApps() {
+  loadingApps.value = true;
+  try {
+    const reg = await api.listApps(settings.value.baseDir);
+    health.value = reg.health ?? {};
+    apps.value = Object.keys(reg.apps ?? {});
+    activeApp.value = reg.activeApp ?? '';
+    if (!selectedApp.value || !usable(selectedApp.value)) {
+      const preferActive = Boolean(activeApp.value) && usable(activeApp.value);
+      selectedApp.value = preferActive ? activeApp.value : usableApps.value[0] ?? '';
+    }
+  } catch (e) {
+    ElMessage.error(String(e));
+  } finally {
+    loadingApps.value = false;
+  }
+}
+
+watch(
+  () => [step.value, mode.value],
+  async ([s]) => {
+    // 每次进入第 2 步都重读：用户在「新建子应用」页刚创建的应用要能立刻出现在列表里
+    if (s === 1) await loadApps();
+  },
+  { immediate: true }
+);
+
+/** 把目录已经不存在的应用从注册表注销，避免每次进向导都在列表里留一条死记录。 */
+async function unregister(name: string) {
+  removing.value = name;
+  try {
+    await api.unregisterApp(settings.value.baseDir, name);
+    ElMessage.success(`已把「${name}」从注册表移除`);
+    apps.value = [];
+    await loadApps();
+  } catch (e) {
+    ElMessage.error(String(e));
+  } finally {
+    removing.value = '';
+  }
+}
+
+watch(selectedApp, async (name) => {
+  if (!name) return;
+  try {
+    // 与默认值合并：子应用的 app.config.json 可能缺可选字段（如 statusBarStyle），
+    // 直接覆盖会让表单出现 undefined。
+    const cfg = await api.readAppConfig(settings.value.baseDir, name);
+    form.value = { ...form.value, ...cfg };
+  } catch (e) {
+    ElMessage.error(String(e));
+  }
+});
+
+const formValid = computed(() => {
+  const f = form.value;
+  return Boolean(
+    (f.appName ?? '').trim() &&
+      apkNameValid.value &&
+      /^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)+$/.test(f.applicationId) &&
+      /^\d{1,3}(\.\d{1,3}){0,2}$/.test(String(f.versionName)) &&
+      Number.isInteger(f.versionCode) &&
+      f.versionCode >= 1 &&
+      // 远程模式必须是一个合法 http(s) 地址，否则打出来的壳会指向空白页
+      (mode.value !== 'remote' || /^https?:\/\/\S+$/.test(f.remoteUrl ?? ''))
+  );
+});
+
+/** 安装包文件名会成为产物文件名（<apkName>-<版本>-<变体>.apk），必须是安全文件名：
+ *  只允许字母数字与连字符/下划线。此前无校验，把网址粘进来会生成非法路径。 */
+const apkNameValid = computed(() => /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(form.value.apkName));
+
+/** 真正会被打进包的是注册表的 activeApp（gradle/hvigor 都按它解析），不是这里选中的值。 */
+const selectionIsActive = computed(
+  () => Boolean(selectedApp.value) && selectedApp.value === activeApp.value
+);
+
+/** 进入构建前的最后一道门：选中项必须已经是当前活动应用，否则打出来的是别人。 */
+function nextStep() {
+  if (!selectionIsActive.value) {
+    ElMessage.warning(
+      `当前打包目标是「${activeApp.value || '未设置'}」，与所选不一致；请先点「保存配置并下发品牌」切换过去`
+    );
+    return;
+  }
+  step.value = 2;
+}
+
+/** 保存 app.config.json（真源）→ 切换为当前活动应用并下发品牌（派生产物由脚本生成） */
+async function saveAndApply() {
+  if (!formValid.value) {
+    ElMessage.warning('请检查表单：包名需为 com.xxx.yyy，版本号为 x.y.z，安装包文件名不能含网址字符');
+    return;
+  }
+  saving.value = true;
+  try {
+    await api.writeAppConfig(settings.value.baseDir, selectedApp.value, form.value);
+    // 走 use-app.js 而不是直接 apply-app-meta.js：前者在写 busy 之前会先把 selectedApp
+    // 写进注册表的 activeApp。构建脚本只认 activeApp，少了这一步就会「选了 A 却打出 B」。
+    await taskRunner.start(applyTaskId, {
+      program: settings.value.nodePath,
+      args: ['scripts/use-app.js', selectedApp.value],
+      cwd: settings.value.baseDir,
+      envs: settings.value.env,
+    });
+    activeApp.value = selectedApp.value;
+    ElMessage.success(`配置已保存到「${selectedApp.value}」，并已设为当前活动应用（构建将打它）`);
+  } catch (e) {
+    ElMessage.error(String(e));
+    saving.value = false;
+  }
+}
+
+// ── 步骤 3：构建 ─────────────────────────────────────────────
+const buildTaskId = 'build';
+const { lines: buildLines, running: buildRunning, exit: buildExit } = useTaskView(ref(buildTaskId));
+const hashTaskId = 'hash';
+const { lines: hashLines, exit: hashExit } = useTaskView(ref(hashTaskId));
+const hashStarted = ref(false);
+
+const canBuild = computed(() => formValid.value);
+
+/** 构建页提示：随平台与包类型变化，说明前置条件和产物去向。 */
+const buildHint = computed(() => {
+  const kind = release.value ? '正式包' : '调试包';
+  return platform.value === 'harmony'
+    ? `鸿蒙${kind}：需要本机安装 DevEco Studio（目录在「设置」页填写）；子应用模式请先执行 npm run build:base；产物投递到基座 dist/<包名>/`
+    : `安卓${kind}：正式包前请确认 Metro 已停（npm run stop）；子应用模式请先执行 npm run build:base；产物投递到基座 dist/<包名>/，构建后自动计算 SHA-256`;
+});
+
+async function build() {
+  hashStarted.value = false;
+  await taskRunner.start(buildTaskId, {
+    program: settings.value.nodePath,
+    args: buildArgs(),
+    cwd: settings.value.baseDir,
+    envs: settings.value.env,
+  });
+}
+
+const installTaskId = 'install';
+const { lines: installLines, running: installRunning } = useTaskView(ref(installTaskId));
+
+/** 装机到已连接的设备 / 模拟器（安卓走 adb，鸿蒙走 hdc）。 */
+async function install() {
+  await taskRunner.start(installTaskId, {
+    program: settings.value.nodePath,
+    args: installArgs(),
+    cwd: settings.value.baseDir,
+    envs: settings.value.env,
+  });
+}
+
+watch(buildExit, async (e) => {
+  if (e?.success) {
+    // apk-hash.js 只扫 .apk，鸿蒙产物是 .hap，不走这一步
+    if (platform.value !== 'android') {
+      ElMessage.success('构建成功（鸿蒙产物已投递到基座 dist/<包名>/）');
+      return;
+    }
+    ElMessage.success('构建成功，正在计算 SHA-256…');
+    hashStarted.value = true;
+    await taskRunner.start(hashTaskId, {
+      program: settings.value.nodePath,
+      args: ['scripts/apk-hash.js'],
+      cwd: settings.value.baseDir,
+      envs: settings.value.env,
+    });
+  }
+});
+</script>
+
+<template>
+  <div style="padding: 20px">
+    <el-steps :active="step" align-center style="margin-bottom: 24px">
+      <el-step title="选择平台" />
+      <el-step title="选择模式与参数" />
+      <el-step title="构建" />
+    </el-steps>
+
+    <!-- 步骤 1：平台 -->
+    <template v-if="step === 0">
+      <el-radio-group v-model="platform" size="large">
+        <el-radio-button value="android">安卓</el-radio-button>
+        <el-radio-button value="harmony">鸿蒙</el-radio-button>
+        <el-radio-button value="ios" disabled>iOS（需 macOS 打包机）</el-radio-button>
+      </el-radio-group>
+      <div class="tip" style="margin-top: 12px">
+        鸿蒙打包需要本机安装 DevEco Studio，未安装请到「设置」页填写 DevEco 目录
+      </div>
+      <div style="margin-top: 24px">
+        <el-button type="primary" @click="step = 1">下一步</el-button>
+      </div>
+    </template>
+
+    <!-- 步骤 2：模式与参数 -->
+    <template v-else-if="step === 1">
+      <el-radio-group v-model="mode">
+        <el-radio value="subapp">本地子应用（用子应用自己的 H5 产物）</el-radio>
+        <el-radio value="remote">远程站点（打包成壳，打开时加载网址）</el-radio>
+      </el-radio-group>
+      <div class="tip" style="margin-top: 8px; max-width: 640px">
+        {{
+          mode === 'remote'
+            ? '远程站点不需要 H5 源码：应用启动后直接加载下面填写的网址。'
+            : '本地子应用需要该子应用已执行过「构建并同步到基座」（产物已进基座 h5/）。'
+        }}
+      </div>
+
+      <!-- 悬空记录：目录已被删除 / 改名，留着只会让每一步都失败 -->
+      <el-alert
+        v-if="brokenApps.length"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="max-width: 640px; margin: 16px 0"
+      >
+        <template #title>注册表里有 {{ brokenApps.length }} 条记录已经找不到目录</template>
+        <div v-for="name in brokenApps" :key="name" class="broken-row">
+          <span class="broken-name">{{ name }}</span>
+          <span class="broken-dir">{{ health[name]?.dir ?? '' }}</span>
+          <el-button
+            type="danger"
+            size="small"
+            plain
+            :loading="removing === name"
+            @click="unregister(name)"
+          >
+            从注册表移除
+          </el-button>
+        </div>
+        <div class="tip">目录被删掉后就留了一条悬空记录，移除它不会影响基座的任何文件</div>
+      </el-alert>
+
+      <el-alert
+        v-if="!loadingApps && apps.length && !usableApps.length"
+        type="error"
+        :closable="false"
+        show-icon
+        title="没有任何可用的子应用，请先到「新建子应用」页创建一个"
+        style="max-width: 640px; margin: 16px 0"
+      />
+
+      <el-form label-width="150px" style="max-width: 640px; margin-top: 20px">
+        <el-form-item label="应用">
+          <el-select v-model="selectedApp" :loading="loadingApps" style="width: 100%">
+            <el-option
+              v-for="name in apps"
+              :key="name"
+              :value="name"
+              :label="labelOf(name)"
+              :disabled="!usable(name)"
+            />
+          </el-select>
+          <div class="tip">
+            品牌 / 版本 / 网址都存在这个应用的 app.config.json 里，两种模式都要选一个；
+            想要一个全新的应用，请到「新建子应用」页创建。
+            保存配置时会同时把它设为「当前活动应用」——构建脚本只认活动应用
+          </div>
+        </el-form-item>
+        <el-form-item label="应用名">
+          <el-input v-model="form.appName" placeholder="手机上显示的名字，如「古韵诗笺」" />
+        </el-form-item>
+        <el-form-item label="应用包名">
+          <el-input v-model="form.applicationId" placeholder="com.company.app" />
+          <div class="tip">应用唯一标识，格式为 反写域名，如 com.company.app</div>
+        </el-form-item>
+        <el-form-item label="安装包文件名">
+          <el-input v-model="form.apkName" placeholder="英文字母数字，如 GuYunShiJian" />
+          <div v-if="form.apkName && !apkNameValid" class="tip-error">
+            只能填字母、数字、连字符（它会成为安装包的文件名，不能填网址）
+          </div>
+        </el-form-item>
+        <el-form-item label="版本号">
+          <el-input v-model="form.versionName" placeholder="1.0.0" style="width: 160px" />
+          <span style="margin-left: 12px">内部版本号</span>
+          <el-input-number v-model="form.versionCode" :min="1" style="margin-left: 8px" />
+        </el-form-item>
+        <el-form-item label="闪屏底色">
+          <el-color-picker v-model="form.splashBackgroundColor" />
+          <span style="margin-left: 12px">{{ form.splashBackgroundColor }}</span>
+        </el-form-item>
+        <el-form-item label="远程地址（网站地址）">
+          <el-input
+            v-model="form.remoteUrl"
+            placeholder="https://…（留空 = 加载子应用本地产物）"
+            :disabled="mode === 'subapp'"
+          />
+          <div v-if="mode === 'remote'" class="tip">
+            远程站点模式必填，应用启动后直接加载这个网址
+          </div>
+        </el-form-item>
+        <el-form-item label="状态栏样式">
+          <el-select v-model="form.statusBarStyle" style="width: 200px">
+            <el-option label="跟随系统深浅色" value="" />
+            <el-option label="深色图标（浅底）" value="dark-content" />
+            <el-option label="浅色图标（深底）" value="light-content" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        title="图标 / 闪屏请把主图放到子应用 app-brand/icon.png（≥1024 方图），用基座 npm run brand:gen 生成五套密度；MVP 暂不内置切图"
+        style="max-width: 640px; margin-bottom: 16px"
+      />
+
+      <el-space>
+        <el-button @click="step = 0">上一步</el-button>
+        <el-button type="primary" :loading="saving || applyRunning" :disabled="!canBuild" @click="saveAndApply">
+          保存配置并下发品牌
+        </el-button>
+        <el-button :disabled="!applyExit?.success" @click="nextStep">下一步</el-button>
+      </el-space>
+
+      <el-card v-if="applyLines.length" shadow="never" style="margin-top: 16px">
+        <template #header>品牌下发日志</template>
+        <pre class="log">{{ applyLines.join('\n') }}</pre>
+      </el-card>
+    </template>
+
+    <!-- 步骤 3：构建 -->
+    <template v-else>
+      <div style="margin-bottom: 16px">
+        <span style="margin-right: 12px">包类型</span>
+        <el-switch
+          v-model="release"
+          active-text="正式包"
+          inactive-text="调试包"
+          :disabled="taskRunner.anyRunning.value"
+        />
+        <div class="tip">
+          正式包需要签名配置：先在「设置」页填好签名相关环境变量，再点构建
+        </div>
+      </div>
+      <div class="tip" style="margin-bottom: 16px">
+        本次打包目标：<b>{{ activeApp || '（未设置）' }}</b>
+        <span v-if="selectedApp && selectedApp !== activeApp" class="tip-error">
+          （与第 2 步所选「{{ selectedApp }}」不一致，请返回第 2 步重新保存配置）
+        </span>
+      </div>
+
+      <el-space>
+        <el-button @click="step = 1">上一步</el-button>
+        <el-button
+          type="primary"
+          :loading="buildRunning"
+          :disabled="taskRunner.anyRunning.value"
+          @click="build"
+        >
+          {{ buildRunning ? '构建中…' : `开始构建（${release ? '正式包' : '调试包'}）` }}
+        </el-button>
+        <el-button
+          v-if="buildRunning"
+          type="danger"
+          plain
+          @click="taskRunner.stop(buildTaskId)"
+        >
+          停止
+        </el-button>
+        <el-button
+          :loading="installRunning"
+          :disabled="taskRunner.anyRunning.value || !buildExit?.success"
+          @click="install"
+        >
+          安装到设备
+        </el-button>
+        <el-tag v-if="buildExit" :type="buildExit.success ? 'success' : 'danger'">
+          {{ buildExit.success ? '构建成功' : `构建失败（exit ${buildExit.code ?? '已终止'}）` }}
+        </el-tag>
+      </el-space>
+
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        :title="buildHint"
+        style="margin: 16px 0"
+      />
+
+      <el-card shadow="never">
+        <template #header>构建日志</template>
+        <pre class="log" style="max-height: 420px; overflow: auto; margin: 0">{{
+          buildLines.join('\n').trim() || (buildRunning ? '正在执行…' : '（暂无输出）')
+        }}</pre>
+      </el-card>
+
+      <el-card v-if="hashStarted" shadow="never" style="margin-top: 16px">
+        <template #header>产物校验值（SHA-256，可直接粘贴进升级清单）</template>
+        <pre class="log" style="max-height: 240px; overflow: auto; margin: 0">{{ hashLines.join('\n') }}</pre>
+      </el-card>
+
+      <el-card v-if="installLines.length" shadow="never" style="margin-top: 16px">
+        <template #header>装机日志</template>
+        <pre class="log" style="max-height: 300px; overflow: auto; margin: 0">{{ installLines.join('\n') }}</pre>
+      </el-card>
+    </template>
+  </div>
+</template>
+
+<style scoped>
+.log {
+  font-family: var(--el-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  margin: 0;
+}
+
+/* 字段说明：小字灰色，跟在输入框下方 */
+.tip {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+  margin-top: 4px;
+}
+
+/* 校验失败提示：小字红色 */
+.tip-error {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-color-danger);
+  margin-top: 4px;
+}
+
+/* 悬空记录列表：一行一个，名字 + 路径 + 移除按钮 */
+.broken-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.broken-name {
+  font-weight: 600;
+  color: var(--el-color-danger);
+}
+
+.broken-dir {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+</style>

@@ -1,0 +1,28 @@
+[package]
+name = "rnbuild-studio"
+version = "0.1.0"
+description = "RNbase 可视化打包工作台"
+edition = "2021"
+
+[lib]
+name = "rnbuild_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# 生产构建开关（官方模板标注 DO NOT REMOVE）：启用后 tauri 以「内嵌前端」模式编译，
+# 从 frontendDist（../dist）读页面；不启用则走 devUrl（http://localhost:5173）——
+# 结果就是 exe 不打包前端、反而去连本机 5173，一旦那个端口跑着别的服务就串台。
+# 注意不要设为 default：tauri dev 需要不启用它才能走 dev server 热更新。
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true
