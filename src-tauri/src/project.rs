@@ -185,13 +185,22 @@ pub fn scan_subapps(base_dir: String) -> Result<Value, String> {
         .parent()
         .ok_or_else(|| "基座目录没有父目录，无法扫描同级子应用".to_string())?;
 
-    // 已登记的名称集合，用于给每条结果打 registered 标记
+    // 已登记的名称：注册表的键名不一定等于目录名（目录 gushici_h5 可能登记为 gushici，
+    // RN_h5 登记为 rn_h5），所以不能按 basename 判断是否已登记，而要按「解析后的目录绝对路径」
+    // 匹配，并把命中的键名回传（registeredAs），供前端直接选中。
     let reg: Value = fs::read_to_string(registry_path(&base_dir))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::json!({ "apps": {} }));
-    let empty_apps = serde_json::Map::new();
-    let apps = reg["apps"].as_object().unwrap_or(&empty_apps);
+    let mut key_by_dir: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(apps) = reg["apps"].as_object() {
+        for (key, entry) in apps {
+            if let Some(rel) = entry["dir"].as_str() {
+                let abs = base.join(rel);
+                key_by_dir.insert(abs.to_string_lossy().to_lowercase(), key.clone());
+            }
+        }
+    }
 
     let mut found: Vec<Value> = Vec::new();
     let entries = fs::read_dir(parent).map_err(|e| format!("读取同级目录失败：{e}"))?;
@@ -213,14 +222,17 @@ pub fn scan_subapps(base_dir: String) -> Result<Value, String> {
         let has_dist_file = dir.join("dist-file").join("index.html").is_file();
         let has_dist = has_dist_file || dir.join("dist").join("index.html").is_file();
         let dist = if has_dist_file { "dist-file" } else { "dist" };
+        let dir_low = dir.to_string_lossy().to_lowercase();
+        let registered_as = key_by_dir.get(&dir_low).cloned().unwrap_or_default();
         let mut m = serde_json::Map::new();
-        m.insert("name".into(), Value::String(name.clone()));
+        m.insert("name".into(), Value::String(name));
         m.insert("dir".into(), Value::String(dir.to_string_lossy().to_string()));
         m.insert("appName".into(), cfg["appName"].clone());
         m.insert("applicationId".into(), cfg["applicationId"].clone());
         m.insert("dist".into(), Value::String(dist.into()));
         m.insert("built".into(), Value::Bool(has_dist));
-        m.insert("registered".into(), Value::Bool(apps.contains_key(&name)));
+        m.insert("registered".into(), Value::Bool(!registered_as.is_empty()));
+        m.insert("registeredAs".into(), Value::String(registered_as));
         found.push(Value::Object(m));
     }
     Ok(Value::Array(found))
@@ -245,10 +257,23 @@ pub fn register_app(base_dir: String, app_name: String, dir: String, dist: Strin
         .as_object_mut()
         .ok_or_else(|| "app-registry.json 的 apps 不是对象".to_string())?;
     if apps.contains_key(&app_name) {
-        return Ok(()); // 幂等：已登记不覆盖
+        return Ok(()); // 幂等：同名键已存在，不覆盖
+    }
+    // 按目录路径再兜一层：同一目录可能已用另一个键名登记（如目录 gushici_h5 登记为 gushici），
+    // 此时不应再插入重复键（否则注册表里两条记录指向同一目录）。
+    let base_abs = Path::new(base_dir.trim_end_matches(['\\', '/']));
+    let dir_low = Path::new(&dir).to_string_lossy().to_lowercase();
+    let already_by_dir = apps.values().any(|e| {
+        e["dir"]
+            .as_str()
+            .map(|rel| base_abs.join(rel).to_string_lossy().to_lowercase() == dir_low)
+            .unwrap_or(false)
+    });
+    if already_by_dir {
+        return Ok(());
     }
     // 同级目录 => ../<basename>；否则用绝对路径
-    let base_parent = Path::new(base_dir.trim_end_matches(['\\', '/'])).parent();
+    let base_parent = base_abs.parent();
     let dir_path = Path::new(&dir);
     let rel = if base_parent.is_some() && base_parent == dir_path.parent() {
         format!(

@@ -163,9 +163,9 @@ async function registerOnly(d: DiscoveredSubapp) {
   }
 }
 
-/** 已登记的目录：直接选它为当前打包目标 */
+/** 已登记的目录：直接选它为当前打包目标（用匹配的注册表键名，键名可能≠目录名） */
 function chooseRegistered(d: DiscoveredSubapp) {
-  selectedApp.value = d.name;
+  selectedApp.value = d.registeredAs || d.name;
   pickVisible.value = false;
 }
 
@@ -180,9 +180,9 @@ async function registerAndSync(d: DiscoveredSubapp) {
   await runUseSync(d.name);
 }
 
-/** 已登记目录：直接同步到基座 */
+/** 已登记目录：直接同步到基座（用匹配的注册表键名） */
 async function syncExisting(d: DiscoveredSubapp) {
-  await runUseSync(d.name);
+  await runUseSync(d.registeredAs || d.name);
 }
 
 /** 跑 use-app.js <name> --sync：把该子应用产物同步进基座 h5/ 并设为当前活动应用 */
@@ -588,7 +588,9 @@ watch(buildExit, async (e) => {
           <div v-for="d in discovered" :key="d.dir" class="sub-row">
             <div class="sub-head">
               <b>{{ d.name }}</b>
-              <el-tag v-if="d.registered" size="small" type="success">已登记</el-tag>
+              <el-tag v-if="d.registered" size="small" type="success">
+                已登记为 {{ d.registeredAs }}
+              </el-tag>
               <el-tag v-if="d.built" size="small" type="info">已构建</el-tag>
               <span class="sub-meta">{{ d.appName }}{{ d.applicationId ? ' · ' + d.applicationId : '' }}</span>
             </div>

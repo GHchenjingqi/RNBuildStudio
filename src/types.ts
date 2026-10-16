@@ -29,8 +29,10 @@ export interface DiscoveredSubapp {
   dist: string;
   /** 该目录是否已存在构建产物（dist/index.html 或 dist-file/index.html） */
   built: boolean;
-  /** 是否已登记进 app-registry.json */
+  /** 是否已登记进 app-registry.json（按目录绝对路径匹配） */
   registered: boolean;
+  /** 若已登记，匹配的注册表键名（键名不一定等于目录名，如目录 gushici_h5 登记为 gushici） */
+  registeredAs: string;
 }
 
 /** 子应用 app.config.json（版本与品牌唯一真源），与基座 apply-app-meta.js 字段对齐 */
