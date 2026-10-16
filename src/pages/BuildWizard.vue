@@ -244,12 +244,25 @@ async function build() {
         envs: settings.value.env,
       });
       const s = settings.value.signing;
+      // 构建前预校验口令/别名，避免 gradle 跑到 packageRelease 才抛 KeytoolException
+      const v = await api.verifyReleaseKeystore({
+        androidAppDir,
+        keystoreName: s.keystoreName,
+        alias: s.alias,
+        storePassword: s.storePassword,
+        keyPassword: s.keyPassword,
+        envs: settings.value.env,
+      });
+      if (!v.ok) {
+        ElMessage.error(`签名校验未通过，已中止构建：${v.message}`);
+        return;
+      }
       envs[`ORG_GRADLE_PROJECT_QUX_UPLOAD_STORE_FILE`] = s.keystoreName;
       envs[`ORG_GRADLE_PROJECT_QUX_UPLOAD_STORE_PASSWORD`] = s.storePassword;
       envs[`ORG_GRADLE_PROJECT_QUX_UPLOAD_KEY_ALIAS`] = s.alias;
       envs[`ORG_GRADLE_PROJECT_QUX_UPLOAD_KEY_PASSWORD`] = s.keyPassword;
       ElMessage.success(
-        `release 签名密钥库${r.existed ? '已复用' : '已自动生成'}：${s.keystoreName}（生产发布请备份此文件）`,
+        `release 签名密钥库${r.existed ? '已复用' : '已自动生成'}且校验通过：${s.keystoreName}（生产发布请备份此文件）`,
       );
     }
   }
