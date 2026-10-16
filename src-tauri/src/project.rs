@@ -172,3 +172,99 @@ pub fn detect_base_dir() -> String {
 pub fn validate_base_dir(path: String) -> bool {
     is_rnbase(Path::new(&path))
 }
+
+/// 扫描基座同级目录里「已存在、但尚未登记」的子应用目录。
+///
+/// 场景：用户早就有子应用工程（如 gushici_h5 / jingyitest），只是没在 GUI 里登记，
+/// 现在只想选它出包、不想再走「新建」建一遍。基座约定子应用建在同级目录，
+/// 故扫描 base_dir 的父目录即可。每个含 app.config.json 的同级目录返回一条摘要。
+#[tauri::command]
+pub fn scan_subapps(base_dir: String) -> Result<Value, String> {
+    let base = Path::new(&base_dir);
+    let parent = base
+        .parent()
+        .ok_or_else(|| "基座目录没有父目录，无法扫描同级子应用".to_string())?;
+
+    // 已登记的名称集合，用于给每条结果打 registered 标记
+    let reg: Value = fs::read_to_string(registry_path(&base_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({ "apps": {} }));
+    let empty_apps = serde_json::Map::new();
+    let apps = reg["apps"].as_object().unwrap_or(&empty_apps);
+
+    let mut found: Vec<Value> = Vec::new();
+    let entries = fs::read_dir(parent).map_err(|e| format!("读取同级目录失败：{e}"))?;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let dir = e.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let cfg_path = dir.join("app.config.json");
+        if !cfg_path.is_file() {
+            continue;
+        }
+        let cfg: Value = fs::read_to_string(&cfg_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(Value::Null);
+        // dist / built 推断与基座 active-app.js detectDist 对齐：dist-file 优先于 dist
+        let has_dist_file = dir.join("dist-file").join("index.html").is_file();
+        let has_dist = has_dist_file || dir.join("dist").join("index.html").is_file();
+        let dist = if has_dist_file { "dist-file" } else { "dist" };
+        let mut m = serde_json::Map::new();
+        m.insert("name".into(), Value::String(name.clone()));
+        m.insert("dir".into(), Value::String(dir.to_string_lossy().to_string()));
+        m.insert("appName".into(), cfg["appName"].clone());
+        m.insert("applicationId".into(), cfg["applicationId"].clone());
+        m.insert("dist".into(), Value::String(dist.into()));
+        m.insert("built".into(), Value::Bool(has_dist));
+        m.insert("registered".into(), Value::Bool(apps.contains_key(&name)));
+        found.push(Value::Object(m));
+    }
+    Ok(Value::Array(found))
+}
+
+/// 把一个已存在的子应用目录登记进注册表（幂等）。
+///
+/// 只写 app-registry.json 这一份真源。dir 以相对基座的路径记录（约定子应用建在同级，
+/// 即 `../<目录名>`；非同级则退回绝对路径，path::resolve 对绝对路径直接返回，同样可用）。
+/// 已登记则跳过，不覆盖已有 dist。
+#[tauri::command]
+pub fn register_app(base_dir: String, app_name: String, dir: String, dist: String) -> Result<(), String> {
+    let p = registry_path(&base_dir);
+    let mut v: Value = fs::read_to_string(&p)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({ "activeApp": "", "apps": {} }));
+    if v["apps"].is_null() {
+        v["apps"] = serde_json::json!({});
+    }
+    let apps = v["apps"]
+        .as_object_mut()
+        .ok_or_else(|| "app-registry.json 的 apps 不是对象".to_string())?;
+    if apps.contains_key(&app_name) {
+        return Ok(()); // 幂等：已登记不覆盖
+    }
+    // 同级目录 => ../<basename>；否则用绝对路径
+    let base_parent = Path::new(base_dir.trim_end_matches(['\\', '/'])).parent();
+    let dir_path = Path::new(&dir);
+    let rel = if base_parent.is_some() && base_parent == dir_path.parent() {
+        format!(
+            "../{}",
+            dir_path.file_name().unwrap_or_default().to_string_lossy()
+        )
+    } else {
+        dir.replace('\\', "/")
+    };
+    let mut entry = serde_json::Map::new();
+    entry.insert("dir".into(), Value::String(rel));
+    entry.insert(
+        "dist".into(),
+        Value::String(if dist.trim().is_empty() { "dist".into() } else { dist.trim().into() }),
+    );
+    apps.insert(app_name.clone(), Value::Object(entry));
+    let body = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    fs::write(&p, body + "\n").map_err(|e| format!("写入 app-registry.json 失败：{e}"))
+}

@@ -15,6 +15,24 @@ export interface AppRegistry {
   health?: Record<string, AppHealth>;
 }
 
+/** scan_subapps 发现的同级子应用目录（含 app.config.json 的目录） */
+export interface DiscoveredSubapp {
+  /** 目录名，作为注册表键名 */
+  name: string;
+  /** 目录绝对路径 */
+  dir: string;
+  /** app.config.json 里的应用名（展示用，可能为空） */
+  appName: string;
+  /** app.config.json 里的包名（展示用，可能为空） */
+  applicationId: string;
+  /** 推断出的产物目录名（dist-file / dist） */
+  dist: string;
+  /** 该目录是否已存在构建产物（dist/index.html 或 dist-file/index.html） */
+  built: boolean;
+  /** 是否已登记进 app-registry.json */
+  registered: boolean;
+}
+
 /** 子应用 app.config.json（版本与品牌唯一真源），与基座 apply-app-meta.js 字段对齐 */
 export interface AppConfig {
   appName: string;

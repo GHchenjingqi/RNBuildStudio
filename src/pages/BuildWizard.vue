@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus';
 import { settings } from '../lib/store';
 import { taskRunner, useTaskView } from '../lib/taskRunner';
 import { api } from '../lib/tauri';
-import type { AppConfig, AppHealth } from '../types';
+import type { AppConfig, AppHealth, DiscoveredSubapp } from '../types';
 
 const step = ref(0);
 
@@ -129,6 +129,82 @@ async function unregister(name: string) {
   } finally {
     removing.value = '';
   }
+}
+
+// ── 选择已有子应用目录：扫描基座同级目录，登记后选它出包 ────────────────
+const pickVisible = ref(false);
+const scanning = ref(false);
+const discovered = ref<DiscoveredSubapp[]>([]);
+
+/** 扫描基座同级目录里含 app.config.json 的子应用目录 */
+async function openPickDir() {
+  pickVisible.value = true;
+  scanning.value = true;
+  discovered.value = [];
+  try {
+    discovered.value = await api.scanSubapps(settings.value.baseDir);
+  } catch (e) {
+    ElMessage.error(String(e));
+  } finally {
+    scanning.value = false;
+  }
+}
+
+/** 仅登记：写进注册表，刷新列表并选中，关闭弹窗 */
+async function registerOnly(d: DiscoveredSubapp) {
+  try {
+    await api.registerApp(settings.value.baseDir, d.name, d.dir, d.dist);
+    ElMessage.success(`已登记「${d.name}」`);
+    await loadApps();
+    selectedApp.value = d.name;
+    pickVisible.value = false;
+  } catch (e) {
+    ElMessage.error(String(e));
+  }
+}
+
+/** 已登记的目录：直接选它为当前打包目标 */
+function chooseRegistered(d: DiscoveredSubapp) {
+  selectedApp.value = d.name;
+  pickVisible.value = false;
+}
+
+/** 登记 + 同步到基座（app:use --sync：清 remoteUrl + 同步 h5/ + 下发品牌） */
+async function registerAndSync(d: DiscoveredSubapp) {
+  try {
+    await api.registerApp(settings.value.baseDir, d.name, d.dir, d.dist);
+  } catch (e) {
+    ElMessage.error(String(e));
+    return;
+  }
+  await runUseSync(d.name);
+}
+
+/** 已登记目录：直接同步到基座 */
+async function syncExisting(d: DiscoveredSubapp) {
+  await runUseSync(d.name);
+}
+
+/** 跑 use-app.js <name> --sync：把该子应用产物同步进基座 h5/ 并设为当前活动应用 */
+const pickSyncTaskId = 'pick-sync';
+const { running: pickSyncRunning, exit: pickSyncExit } = useTaskView(ref(pickSyncTaskId));
+watch(pickSyncExit, (e) => {
+  if (!e) return;
+  if (e.success) {
+    ElMessage.success('已同步到基座 h5/，并已设为当前活动应用，可直接出包');
+    loadApps();
+    pickVisible.value = false;
+  } else {
+    ElMessage.error(`同步失败（exit ${e.code ?? '已终止'}），请检查该目录是否已构建（npm run build）`);
+  }
+});
+async function runUseSync(name: string) {
+  await taskRunner.start(pickSyncTaskId, {
+    program: settings.value.nodePath,
+    args: ['scripts/use-app.js', name, '--sync'],
+    cwd: settings.value.baseDir,
+    envs: settings.value.env,
+  });
 }
 
 watch(selectedApp, async (name) => {
@@ -445,9 +521,15 @@ watch(buildExit, async (e) => {
               :disabled="!usable(name)"
             />
           </el-select>
+          <div style="margin-top: 8px">
+            <el-button size="small" :disabled="taskRunner.anyRunning.value" @click="openPickDir">
+              选择已有子应用目录…
+            </el-button>
+          </div>
           <div class="tip">
             品牌 / 版本 / 网址都存在这个应用的 app.config.json 里，两种模式都要选一个；
-            想要一个全新的应用，请到「新建子应用」页创建。
+            想要一个全新的应用，请到「新建子应用」页创建；已有子应用工程（在基座同级目录、
+            含 app.config.json）可直接点上方「选择已有子应用目录」登记进来。
             保存配置时会同时把它设为「当前活动应用」——构建脚本只认活动应用
           </div>
         </el-form-item>
@@ -491,6 +573,62 @@ watch(buildExit, async (e) => {
           </el-select>
         </el-form-item>
       </el-form>
+
+      <el-dialog v-model="pickVisible" title="选择已有子应用目录" width="680px">
+        <div v-if="scanning" class="tip">正在扫描基座同级目录…</div>
+        <el-alert
+          v-else-if="!discovered.length"
+          type="info"
+          :closable="false"
+          show-icon
+          title="在基座同级目录没有发现含 app.config.json 的子应用目录"
+          description="子应用需建在基座同级目录（如 D:/codes/RNbase 旁的 gushici_h5）。若你的工程在别处，请先把它放到同级目录，或到「新建子应用」页创建一个。"
+        />
+        <div v-else>
+          <div v-for="d in discovered" :key="d.dir" class="sub-row">
+            <div class="sub-head">
+              <b>{{ d.name }}</b>
+              <el-tag v-if="d.registered" size="small" type="success">已登记</el-tag>
+              <el-tag v-if="d.built" size="small" type="info">已构建</el-tag>
+              <span class="sub-meta">{{ d.appName }}{{ d.applicationId ? ' · ' + d.applicationId : '' }}</span>
+            </div>
+            <div class="sub-dir">{{ d.dir }}</div>
+            <div class="sub-actions">
+              <template v-if="d.registered">
+                <el-button size="small" type="primary" plain @click="chooseRegistered(d)">选择</el-button>
+                <el-button
+                  v-if="d.built"
+                  size="small"
+                  :loading="pickSyncRunning"
+                  :disabled="taskRunner.anyRunning.value"
+                  @click="syncExisting(d)"
+                >
+                  同步到基座
+                </el-button>
+              </template>
+              <template v-else>
+                <el-button size="small" :disabled="taskRunner.anyRunning.value" @click="registerOnly(d)">
+                  仅登记
+                </el-button>
+                <el-button
+                  v-if="d.built"
+                  size="small"
+                  type="primary"
+                  :loading="pickSyncRunning"
+                  :disabled="taskRunner.anyRunning.value"
+                  @click="registerAndSync(d)"
+                >
+                  登记并同步到基座
+                </el-button>
+                <span v-else class="tip">该目录还没有构建产物（dist/index.html），仅登记后需先构建</span>
+              </template>
+            </div>
+          </div>
+        </div>
+        <template #footer>
+          <el-button @click="pickVisible = false">关闭</el-button>
+        </template>
+      </el-dialog>
 
       <el-alert
         type="warning"
@@ -683,5 +821,35 @@ watch(buildExit, async (e) => {
   white-space: nowrap;
   color: var(--el-text-color-secondary);
   font-size: 12px;
+}
+
+/* 选择已有子应用目录：每行一个目录卡片 */
+.sub-row {
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+.sub-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sub-meta {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+.sub-dir {
+  margin: 6px 0 10px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  word-break: break-all;
+}
+.sub-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 </style>

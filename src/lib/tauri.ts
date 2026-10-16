@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { AppConfig, AppRegistry, TaskExit, TaskLine } from '../types';
+import type { AppConfig, AppRegistry, DiscoveredSubapp, TaskExit, TaskLine } from '../types';
 
 export interface RunTaskOptions {
   [key: string]: unknown;
@@ -63,6 +63,11 @@ export const api = {
   verifyReleaseKeystore: (opts: VerifyKeystoreOptions) =>
     invoke<KeystoreVerify>('verify_release_keystore', opts),
   listApps: (baseDir: string) => invoke<AppRegistry>('list_apps', { baseDir }),
+  /** 扫描基座同级目录里含 app.config.json 的子应用目录（含是否已登记 / 是否已构建） */
+  scanSubapps: (baseDir: string) => invoke<DiscoveredSubapp[]>('scan_subapps', { baseDir }),
+  /** 把一个已存在的子应用目录登记进注册表（幂等） */
+  registerApp: (baseDir: string, appName: string, dir: string, dist: string) =>
+    invoke<void>('register_app', { baseDir, appName, dir, dist }),
   /** 注销注册表中的一条记录（清理目录已被删掉的应用） */
   unregisterApp: (baseDir: string, appName: string) =>
     invoke<void>('unregister_app', { baseDir, appName }),

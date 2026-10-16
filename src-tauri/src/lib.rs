@@ -14,7 +14,9 @@ pub fn run() {
             project::read_app_config,
             project::write_app_config,
             project::detect_base_dir,
-            project::validate_base_dir
+            project::validate_base_dir,
+            project::scan_subapps,
+            project::register_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
