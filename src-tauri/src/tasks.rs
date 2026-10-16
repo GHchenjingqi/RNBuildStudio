@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -210,4 +211,109 @@ pub fn stop_task(registry: State<'_, TaskRegistry>, task_id: String) -> Result<(
         }
         None => Err(format!("任务 {task_id} 不存在或已结束")),
     }
+}
+
+/// 确保安卓 release 签名密钥库存在：不存在则用 `keytool` 自动生成自签名密钥库。
+///
+/// RNbase 的 `app/build.gradle` 只在 gradle 属性 `QUX_UPLOAD_STORE_FILE` 存在时才填
+/// release 签名配置；该属性由环境变量 `ORG_GRADLE_PROJECT_QUX_UPLOAD_*` 注入
+/// （见 platforms/android/gradle.properties 注释）。密钥库文件（`*.keystore`）被 gitignore，
+/// **不会随仓库同步** —— 换一台机器打正式包必然缺它，从而导致
+/// `SigningConfig "release" is missing required property "storeFile"`。
+///
+/// 这里把"缺则自动生成"的能力收进打包器：首次在任意机器上打正式包时，
+/// 前端会先调用本命令保证密钥库就位，再把签名变量注入 gradle 进程，
+/// 从而让 release 构建开箱即用（除非用户在设置里自带了 `QUX_UPLOAD_*`，则尊重其配置）。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeystoreResult {
+    /// 密钥库绝对路径
+    pub path: String,
+    /// 调用前文件已存在（复用既有密钥库，未重新生成）
+    pub existed: bool,
+    /// 本次调用实际新生成了密钥库
+    pub created: bool,
+}
+
+#[tauri::command]
+pub fn ensure_release_keystore(
+    android_app_dir: String,
+    keystore_name: String,
+    alias: String,
+    store_password: String,
+    key_password: String,
+    envs: HashMap<String, String>,
+) -> Result<KeystoreResult, String> {
+    let dir = Path::new(&android_app_dir);
+    let path = dir.join(&keystore_name);
+
+    if path.exists() {
+        return Ok(KeystoreResult {
+            path: path.to_string_lossy().into_owned(),
+            existed: true,
+            created: false,
+        });
+    }
+
+    // 定位 keytool：优先 JAVA_HOME/bin，否则 PATH 上的 keytool
+    let java_home = envs.get("JAVA_HOME").filter(|v| !v.trim().is_empty());
+    let keytool = if let Some(home) = java_home {
+        let p = Path::new(home)
+            .join("bin")
+            .join(if cfg!(windows) { "keytool.exe" } else { "keytool" });
+        if p.exists() {
+            p
+        } else {
+            Path::new("keytool").to_path_buf()
+        }
+    } else {
+        Path::new("keytool").to_path_buf()
+    };
+
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败 {android_app_dir}：{e}"))?;
+
+    // -dname 提供完整 DN，避免 keytool 进入交互式逐项提问（后台进程会卡死等待输入）。
+    let dname = "CN=QUX, OU=Dev, O=QUX, L=Shenzhen, ST=Guangdong, C=CN";
+    let status = Command::new(&keytool)
+        .args([
+            "-genkeypair",
+            "-v",
+            "-keystore",
+            &path.to_string_lossy(),
+            "-keyalg",
+            "RSA",
+            "-keysize",
+            "2048",
+            "-validity",
+            "10000",
+            "-alias",
+            &alias,
+            "-storepass",
+            &store_password,
+            "-keypass",
+            &key_password,
+            "-dname",
+            dname,
+        ])
+        .envs(&envs)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .status()
+        .map_err(|e| {
+            format!(
+                "启动 keytool 失败（program={keytool:?}）：{e}。请确认 JAVA_HOME 指向 JDK，或 keytool 已在 PATH 中"
+            )
+        })?;
+
+    if !status.success() {
+        return Err(format!(
+            "生成签名密钥库失败（keytool 退出码 {status:?}）。请检查 JAVA_HOME / JDK 配置，或在设置中改用自有密钥库"
+        ));
+    }
+
+    Ok(KeystoreResult {
+        path: path.to_string_lossy().into_owned(),
+        existed: false,
+        created: true,
+    })
 }

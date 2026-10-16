@@ -227,11 +227,37 @@ const buildHint = computed(() => {
 
 async function build() {
   hashStarted.value = false;
+  // 合并工具链环境变量；release 包额外注入签名变量（缺密钥库则打包器自动生成）
+  const envs: Record<string, string> = { ...settings.value.env };
+  if (release.value) {
+    const userStoreFile = settings.value.env['ORG_GRADLE_PROJECT_QUX_UPLOAD_STORE_FILE'];
+    if (userStoreFile) {
+      ElMessage.info('检测到设置中自定义的 release 签名变量，将直接使用');
+    } else {
+      const androidAppDir = `${settings.value.baseDir}/platforms/android/app`;
+      const r = await api.ensureReleaseKeystore({
+        androidAppDir,
+        keystoreName: settings.value.signing.keystoreName,
+        alias: settings.value.signing.alias,
+        storePassword: settings.value.signing.storePassword,
+        keyPassword: settings.value.signing.keyPassword,
+        envs: settings.value.env,
+      });
+      const s = settings.value.signing;
+      envs[`ORG_GRADLE_PROJECT_QUX_UPLOAD_STORE_FILE`] = s.keystoreName;
+      envs[`ORG_GRADLE_PROJECT_QUX_UPLOAD_STORE_PASSWORD`] = s.storePassword;
+      envs[`ORG_GRADLE_PROJECT_QUX_UPLOAD_KEY_ALIAS`] = s.alias;
+      envs[`ORG_GRADLE_PROJECT_QUX_UPLOAD_KEY_PASSWORD`] = s.keyPassword;
+      ElMessage.success(
+        `release 签名密钥库${r.existed ? '已复用' : '已自动生成'}：${s.keystoreName}（生产发布请备份此文件）`,
+      );
+    }
+  }
   await taskRunner.start(buildTaskId, {
     program: settings.value.nodePath,
     args: buildArgs(),
     cwd: settings.value.baseDir,
-    envs: settings.value.env,
+    envs,
   });
 }
 
@@ -486,7 +512,9 @@ watch(buildExit, async (e) => {
           :disabled="taskRunner.anyRunning.value"
         />
         <div class="tip">
-          正式包需要签名配置：先在「设置」页填好签名相关环境变量，再点构建
+          正式包需签名：打包器会在缺少密钥库时自动生成（默认落在
+          <code>platforms/android/app/{{ settings.signing.keystoreName }}</code>，可在「设置」页修改或改用自有密钥库）。
+          生产发布请妥善备份该密钥库——丢失将无法再为同一应用发布更新
         </div>
       </div>
       <div class="tip" style="margin-bottom: 16px">

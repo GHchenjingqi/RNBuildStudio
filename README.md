@@ -112,7 +112,12 @@ npm run exe        # = tauri build --no-bundle：构建前端 + release 编译�
 
 - 只读写**真源文件**：`app-registry.json`、`<子应用>/app.config.json`；
   `version.json` / `res/` / `h5/` 等派生产物一律由基座脚本生成，GUI 不直写
-- 签名口令（`QUX_UPLOAD_*`）不进项目目录，后续版本走系统凭据库（Electron safeStorage 等价物：Tauri stronghold / OS keychain）
+- 安卓**正式包自动签名**：基座 `app/build.gradle` 仅在 gradle 属性 `QUX_UPLOAD_STORE_FILE` 存在时才填 release 签名；
+  该属性由 `ORG_GRADLE_PROJECT_QUX_UPLOAD_*` 环境变量注入（口令不进项目目录）。
+  **密钥库（`*.keystore`）被 gitignore、不随仓库同步**，换机器打正式包必缺 —— 因此打包器在构建 release 前会先调用
+  `ensure_release_keystore`：若 `platforms/android/app/<keystoreName>` 不存在，就用本机 keytool 自动生成自签名密钥库，
+  并把签名变量注入 gradle 进程，让正式包开箱即用。密钥库名 / 别名 / 口令可在「设置 → 安卓正式包签名」修改；
+  生产发布请替换为自有密钥库并妥善备份（丢失无法再更新同一应用）。口令仅存于本机设置（localStorage），后续版本改走系统凭据库。
 - hdc 永远返回 0，鸿蒙装机状态必须解析输出而非看 exit code（构建脚本已按此口径，GUI 只透传日志）
 - **读子进程输出必须容错，不能中途放弃管道**：早期版本用
   `BufReader::lines().map_while(Result::ok)` 转发日志，Windows 下 gradle / JDK 会吐

@@ -40,6 +40,18 @@ export interface TaskExit {
   success: boolean;
 }
 
+/** 安卓 release 签名配置（本地密钥库，落在本机，不随仓库同步） */
+export interface SigningConfig {
+  /** 密钥库文件名，落在 <基座>/platforms/android/app/ 下（与 app/build.gradle 相对解析一致） */
+  keystoreName: string;
+  /** 密钥别名 */
+  alias: string;
+  /** 密钥库口令 */
+  storePassword: string;
+  /** 密钥口令（通常与密钥库口令相同） */
+  keyPassword: string;
+}
+
 /** 工作台设置（localStorage 持久化） */
 export interface Settings {
   /** RNbase 基座路径 */
@@ -48,12 +60,20 @@ export interface Settings {
   nodePath: string;
   /** 工具链环境变量注入（GUI 启动不继承 shell 的 PATH） */
   env: Record<string, string>;
+  /** 安卓正式包签名（缺密钥库时打包器自动生成，也可改为自有密钥库） */
+  signing: SigningConfig;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   baseDir: 'D:/codes/RNbase',
   nodePath: 'node',
   env: {},
+  signing: {
+    keystoreName: 'QUX-release.keystore',
+    alias: 'qux',
+    storePassword: 'android',
+    keyPassword: 'android',
+  },
 };
 
 /** 设置页预置的工具链环境变量（可留空）。key 为真实环境变量名（必须英文），
