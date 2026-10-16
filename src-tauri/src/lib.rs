@@ -8,6 +8,7 @@ pub fn run() {
             tasks::run_task,
             tasks::stop_task,
             tasks::ensure_release_keystore,
+            tasks::verify_release_keystore,
             project::list_apps,
             project::unregister_app,
             project::read_app_config,

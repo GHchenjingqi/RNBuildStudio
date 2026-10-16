@@ -29,6 +29,27 @@ export interface KeystoreResult {
   created: boolean;
 }
 
+/** verify_release_keystore 入参（与 EnsureKeystoreOptions 同构） */
+export interface VerifyKeystoreOptions {
+  [key: string]: unknown;
+  androidAppDir: string;
+  keystoreName: string;
+  alias: string;
+  storePassword: string;
+  keyPassword: string;
+  envs: Record<string, string>;
+}
+
+/** verify_release_keystore 返回 */
+export interface KeystoreVerify {
+  ok: boolean;
+  exists: boolean;
+  storeOk: boolean;
+  aliasExists: boolean;
+  keyOk: boolean;
+  message: string;
+}
+
 export const api = {
   /** 启动基座脚本任务（日志走 task-line / task-exit 事件流） */
   runTask: (opts: RunTaskOptions) => invoke<void>('run_task', opts),
@@ -36,6 +57,9 @@ export const api = {
   /** 确保安卓 release 签名密钥库存在（缺则自动用 keytool 生成），返回路径与状态 */
   ensureReleaseKeystore: (opts: EnsureKeystoreOptions) =>
     invoke<KeystoreResult>('ensure_release_keystore', opts),
+  /** 校验密钥库口令/别名是否正确（构建前预检，避免 gradle 跑一半才报 KeytoolException） */
+  verifyReleaseKeystore: (opts: VerifyKeystoreOptions) =>
+    invoke<KeystoreVerify>('verify_release_keystore', opts),
   listApps: (baseDir: string) => invoke<AppRegistry>('list_apps', { baseDir }),
   /** 注销注册表中的一条记录（清理目录已被删掉的应用） */
   unregisterApp: (baseDir: string, appName: string) =>

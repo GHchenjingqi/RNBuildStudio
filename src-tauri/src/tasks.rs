@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -256,19 +256,7 @@ pub fn ensure_release_keystore(
     }
 
     // 定位 keytool：优先 JAVA_HOME/bin，否则 PATH 上的 keytool
-    let java_home = envs.get("JAVA_HOME").filter(|v| !v.trim().is_empty());
-    let keytool = if let Some(home) = java_home {
-        let p = Path::new(home)
-            .join("bin")
-            .join(if cfg!(windows) { "keytool.exe" } else { "keytool" });
-        if p.exists() {
-            p
-        } else {
-            Path::new("keytool").to_path_buf()
-        }
-    } else {
-        Path::new("keytool").to_path_buf()
-    };
+    let keytool = locate_keytool(&envs);
 
     std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败 {android_app_dir}：{e}"))?;
 
@@ -315,5 +303,160 @@ pub fn ensure_release_keystore(
         path: path.to_string_lossy().into_owned(),
         existed: false,
         created: true,
+    })
+}
+
+/// 定位 keytool：优先 `JAVA_HOME/bin`，否则 PATH 上的 keytool。
+fn locate_keytool(envs: &HashMap<String, String>) -> PathBuf {
+    let java_home = envs.get("JAVA_HOME").filter(|v| !v.trim().is_empty());
+    if let Some(home) = java_home {
+        let p = Path::new(home)
+            .join("bin")
+            .join(if cfg!(windows) { "keytool.exe" } else { "keytool" });
+        if p.exists() {
+            return p;
+        }
+    }
+    Path::new("keytool").to_path_buf()
+}
+
+/// 校验安卓 release 签名密钥库：密钥库是否存在、密钥库口令(storepass)是否正确、
+/// 别名是否存在、密钥口令(keypass)是否正确。用于在正式包构建**前**就发现
+/// 「口令不匹配 / 别名不符」这类错误（否则 gradle 会跑到 packageRelease 才抛
+/// `KeytoolException: keystore password was incorrect`，排查成本高）。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeystoreVerify {
+    /// 整体是否可用（四项全通过）
+    pub ok: bool,
+    /// 密钥库文件是否存在
+    pub exists: bool,
+    /// 密钥库口令(storepass)是否正确
+    pub store_ok: bool,
+    /// 别名是否存在于密钥库中
+    pub alias_exists: bool,
+    /// 密钥口令(keypass)是否正确（仅当 store_ok 且 alias_exists 时才有意义）
+    pub key_ok: bool,
+    /// 人类可读诊断信息
+    pub message: String,
+}
+
+#[tauri::command]
+pub fn verify_release_keystore(
+    android_app_dir: String,
+    keystore_name: String,
+    alias: String,
+    store_password: String,
+    key_password: String,
+    envs: HashMap<String, String>,
+) -> Result<KeystoreVerify, String> {
+    let dir = Path::new(&android_app_dir);
+    let path = dir.join(&keystore_name);
+    if !path.exists() {
+        return Ok(KeystoreVerify {
+            ok: false,
+            exists: false,
+            store_ok: false,
+            alias_exists: false,
+            key_ok: false,
+            message: format!(
+                "密钥库不存在：{}。请先在设置页生成，或确认文件名与基座路径正确",
+                path.to_string_lossy()
+            ),
+        });
+    }
+    let keytool = locate_keytool(&envs);
+
+    // 1) 校验密钥库口令：只列库（不需要 keypass / alias）
+    let out1 = Command::new(&keytool)
+        .args([
+            "-list",
+            "-keystore",
+            &path.to_string_lossy(),
+            "-storepass",
+            &store_password,
+        ])
+        .envs(&envs)
+        .output()
+        .map_err(|e| format!("启动 keytool 失败（{keytool:?}）：{e}"))?;
+    let s1 = String::from_utf8_lossy(&out1.stderr).to_string()
+        + &String::from_utf8_lossy(&out1.stdout);
+    if !out1.status.success() {
+        if s1.contains("password was incorrect")
+            || s1.contains("Password verification failed")
+            || s1.contains("tampered")
+        {
+            return Ok(KeystoreVerify {
+                ok: false,
+                exists: true,
+                store_ok: false,
+                alias_exists: false,
+                key_ok: false,
+                message: "密钥库口令(storepass)不正确：请在设置页填写生成密钥库时使用的密钥库口令".into(),
+            });
+        }
+        return Err(format!(
+            "读取密钥库失败：{}",
+            s1.trim().lines().last().unwrap_or("未知错误").to_string()
+        ));
+    }
+
+    // 2) 校验别名 + 密钥口令
+    let out2 = Command::new(&keytool)
+        .args([
+            "-list",
+            "-keystore",
+            &path.to_string_lossy(),
+            "-storepass",
+            &store_password,
+            "-keypass",
+            &key_password,
+            "-alias",
+            &alias,
+        ])
+        .envs(&envs)
+        .output()
+        .map_err(|e| format!("启动 keytool 失败（{keytool:?}）：{e}"))?;
+    let s2 = String::from_utf8_lossy(&out2.stderr).to_string()
+        + &String::from_utf8_lossy(&out2.stdout);
+    if !out2.status.success() {
+        if s2.contains("alias") && s2.contains("does not exist") {
+            return Ok(KeystoreVerify {
+                ok: false,
+                exists: true,
+                store_ok: true,
+                alias_exists: false,
+                key_ok: false,
+                message: format!(
+                    "密钥库口令正确，但别名「{alias}」不存在：请在设置页填写生成密钥库时使用的别名"
+                ),
+            });
+        }
+        if s2.contains("Cannot recover key")
+            || s2.contains("UnrecoverableKeyException")
+            || s2.contains("password was incorrect")
+        {
+            return Ok(KeystoreVerify {
+                ok: false,
+                exists: true,
+                store_ok: true,
+                alias_exists: true,
+                key_ok: false,
+                message: "密钥口令(keypass)不正确：请在设置页填写生成密钥库时使用的密钥口令（注意密钥口令可能与密钥库口令不同）".into(),
+            });
+        }
+        return Err(format!(
+            "校验密钥失败：{}",
+            s2.trim().lines().last().unwrap_or("未知错误").to_string()
+        ));
+    }
+
+    Ok(KeystoreVerify {
+        ok: true,
+        exists: true,
+        store_ok: true,
+        alias_exists: true,
+        key_ok: true,
+        message: "密钥库校验通过：口令与别名均正确".into(),
     })
 }
