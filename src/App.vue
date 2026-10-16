@@ -15,15 +15,14 @@ const pages = {
   settings: { title: '设置', comp: Settings },
 } as const;
 
-// 启动即自动探测基座目录：用户把 exe 丢进 RNbase 根目录时，全程零配置。
+// 启动即自动探测基座目录：优先用 exe 自身所在的合法基座（用户把 exe 丢进某个基座根目录即用），
+// 这样把 exe 放在 jingyi_app_base 就一定打包 jingyi_app_base，而不会沿用历史遗留的其它基座路径。
 onMounted(async () => {
-  if (!settings.value.baseDir.trim()) {
-    try {
-      const dir = await api.detectBaseDir();
-      if (dir) saveSettings({ ...settings.value, baseDir: dir });
-    } catch {
-      /* 探测失败不阻塞启动，用户可在设置页手动填 */
-    }
+  try {
+    const dir = await api.detectBaseDir();
+    if (dir) saveSettings({ ...settings.value, baseDir: dir });
+  } catch {
+    /* 探测失败不阻塞启动，用户可在设置页手动填 */
   }
 });
 </script>
