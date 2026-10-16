@@ -6,7 +6,7 @@
 //!  - 双击 exe 启动时不继承 shell 的 PATH，工具链路径由前端设置页注入 envs。
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -42,26 +42,56 @@ pub struct TaskExit {
 /// `map_while(Result::ok)` 会**直接结束循环** → `ChildStdout` 被 drop → 管道读端
 /// 关闭 → 基座侧 gradle.js 再写就是 EPIPE，整个打包被打成「失败」（构建其实还在跑，
 /// 甚至已经跑完，只是没人收尾）。读端必须活到子进程退出为止。
+///
+/// 为什么还要处理 `\r`：Gradle 分发包下载器（gradlew）用**回车覆盖同一行**刷进度
+/// （`12%\r 34%\r …`，整段不换行）。旧实现只按 `\n` 转发，于是整个下载期间
+/// 累积的字节一直憋在缓冲里、UI 一行都收不到 → 用户以为卡死、没有进度条。
+/// 这里把每个 `\r` 当成一帧进度转发出去（相同帧去重，避免刷屏），让前端能显示
+/// 「正在下载（xx%）」。正常以 `\n` 结尾的日志行完全不受影响。
 fn pump_lines<R: Read>(reader: R, mut emit: impl FnMut(String)) {
     let mut reader = BufReader::new(reader);
+    let mut pending: Vec<u8> = Vec::with_capacity(1024);
+    let mut last_frame: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
     loop {
-        let mut buf = Vec::new();
-        match reader.read_until(b'\n', &mut buf) {
+        let n = match reader.read(&mut chunk) {
             Ok(0) => break, // EOF：子进程结束
-            Ok(_) => {}
+            Ok(n) => n,
             Err(e) => {
                 emit(format!("<读取输出失败：{e}>"));
                 break;
             }
-        }
-        while let Some(&last) = buf.last() {
-            if last == b'\n' || last == b'\r' {
-                buf.pop();
-            } else {
-                break;
+        };
+        for &b in &chunk[..n] {
+            match b {
+                b'\n' => {
+                    // 行结束：去掉行尾可能残留的 \r，发出并清空
+                    while pending.last() == Some(&b'\r') {
+                        pending.pop();
+                    }
+                    if !pending.is_empty() {
+                        emit(String::from_utf8_lossy(&pending).into_owned());
+                        pending.clear();
+                    }
+                }
+                b'\r' => {
+                    // 回车覆盖：把当前这一帧作为一条进度行转发（相同帧去重），
+                    // 然后清空，等下载器下一段字节从行首继续覆盖、累积成下一帧。
+                    if !pending.is_empty() {
+                        if pending != last_frame {
+                            emit(String::from_utf8_lossy(&pending).into_owned());
+                            last_frame = pending.clone();
+                        }
+                        pending.clear();
+                    }
+                }
+                _ => pending.push(b),
             }
         }
-        emit(String::from_utf8_lossy(&buf).into_owned());
+    }
+    // EOF：残留的未换行内容（下载进度的最后一条可能没结尾换行）也补发出来。
+    if !pending.is_empty() {
+        emit(String::from_utf8_lossy(&pending).into_owned());
     }
 }
 
