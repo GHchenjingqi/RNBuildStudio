@@ -44,10 +44,12 @@ function installArgs(): string[] {
 }
 
 // ── 步骤 2：选模式 + 参数表单 ────────────────────────────────
-// subapp = 本地子应用（选已登记应用，产物已同步进 h5/）
+// 实际只有两种场景：① 产物已经在基座 h5/ 里（现成的 H5，或手动把子应用构建好同步进去）
+// → 直接打包 h5/；② 是个网址 → 远程站点。原先的「本地子应用」模式与「直接用 h5/ 打包」
+// 重复（都要先把产物弄进 h5/），已移除。
+// adhoc  = 直接用 h5/ 打包（免子应用：向导内联手填品牌信息，APK 加载 h5/）
 // remote = 远程站点（打包成壳，打开时加载网址）
-// adhoc  = 直接用 h5/ 打包（免子应用：产物已在 h5/，向导内联手填品牌信息直接出包）
-const mode = ref<'subapp' | 'remote' | 'adhoc'>('subapp');
+const mode = ref<'adhoc' | 'remote'>('adhoc');
 const apps = ref<string[]>([]);
 const health = ref<Record<string, AppHealth>>({});
 const activeApp = ref('');
@@ -573,16 +575,13 @@ watch(buildExit, async (e) => {
     <template v-else-if="step === 1">
       <el-radio-group v-model="mode">
         <el-radio value="adhoc">直接用 h5/ 打包（免子应用）</el-radio>
-        <el-radio value="subapp">本地子应用（用子应用自己的 H5 产物）</el-radio>
         <el-radio value="remote">远程站点（打包成壳，打开时加载网址）</el-radio>
       </el-radio-group>
       <div class="tip" style="margin-top: 8px; max-width: 640px">
         {{
           mode === 'adhoc'
-            ? '产物已经在基座 h5/ 里（或别人给了一份做好的 H5），直接在这里手填应用名/包名/版本就能出包，不用建子应用、不用登记。'
-            : mode === 'remote'
-              ? '远程站点不需要 H5 源码：应用启动后直接加载下面填写的网址。'
-              : '本地子应用需要该子应用已执行过「构建并同步到基座」（产物已进基座 h5/）。'
+            ? '产物已经在基座 h5/ 里（现成的 H5，或你手动把子应用构建好同步进去），直接在这里手填应用名/包名/版本就能出包，不用建子应用、不用登记。'
+            : '远程站点不需要 H5 源码：应用启动后直接加载下面填写的网址。'
         }}
       </div>
 
@@ -678,8 +677,7 @@ watch(buildExit, async (e) => {
         <el-form-item v-if="!isAdhoc" label="远程地址（网站地址）">
           <el-input
             v-model="form.remoteUrl"
-            placeholder="https://…（留空 = 加载子应用本地产物）"
-            :disabled="mode === 'subapp'"
+            placeholder="https://…（应用启动后直接加载这个网址）"
           />
           <div v-if="mode === 'remote'" class="tip">
             远程站点模式必填，应用启动后直接加载这个网址
