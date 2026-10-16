@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { saveSettings, settings } from '../lib/store';
 import { api } from '../lib/tauri';
 import { ENV_PRESETS } from '../types';
@@ -91,6 +91,45 @@ async function genOrVerifyKeystore() {
     keystoreBusy.value = false;
   }
 }
+
+/** 强制重新生成：删掉旧密钥库，用当前设置（默认 android/android/qux）重建。 */
+async function forceRegenKeystore() {
+  if (!keystorePath.value) {
+    ElMessage.warning('请先填写密钥库文件名');
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      '将删除现有密钥库，并用当前设置重新生成一个新密钥库。' +
+        '用旧密钥库签过的 APK 将无法覆盖安装新包（需先卸载旧 APK）。' +
+        '若这是生产正式签名，切勿继续（会作废正式签名且无法恢复）！',
+      '强制重新生成密钥库',
+      { confirmButtonText: '删除并重新生成', cancelButtonText: '取消', type: 'warning' },
+    );
+  } catch {
+    return; // 用户取消
+  }
+  keystoreBusy.value = true;
+  keystoreMsg.value = '';
+  try {
+    const r = await api.ensureReleaseKeystore({
+      androidAppDir: `${draft.baseDir.trim()}/platforms/android/app`,
+      keystoreName: draft.signing.keystoreName.trim() || 'QUX-release.keystore',
+      alias: draft.signing.alias.trim() || 'qux',
+      storePassword: draft.signing.storePassword,
+      keyPassword: draft.signing.keyPassword,
+      envs: draft.env,
+      force: true,
+    });
+    keystoreMsg.value = `已删除旧密钥库并重新生成：${r.path}`;
+    ElMessage.success(keystoreMsg.value);
+  } catch (e) {
+    keystoreMsg.value = String(e);
+    ElMessage.error(String(e));
+  } finally {
+    keystoreBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -162,7 +201,10 @@ async function genOrVerifyKeystore() {
       </el-form-item>
       <el-form-item>
         <el-button :loading="keystoreBusy" @click="genOrVerifyKeystore">生成 / 校验密钥库</el-button>
-        <span v-if="keystoreMsg" class="tip" :style="{ color: keystoreMsg.includes('正确') || keystoreMsg.includes('已生成') ? '#67c23a' : '#f56c6c' }">{{ keystoreMsg }}</span>
+        <el-button :loading="keystoreBusy" type="warning" plain @click="forceRegenKeystore">
+          强制重新生成
+        </el-button>
+        <span v-if="keystoreMsg" class="tip" :style="{ color: keystoreMsg.includes('正确') || keystoreMsg.includes('已生成') || keystoreMsg.includes('重新生成') ? '#67c23a' : '#f56c6c' }">{{ keystoreMsg }}</span>
       </el-form-item>
 
       <el-form-item>

@@ -20,6 +20,8 @@ export interface EnsureKeystoreOptions {
   storePassword: string;
   keyPassword: string;
   envs: Record<string, string>;
+  /** true = 删除已存在的密钥库并用当前口令/别名重建（设置页「强制重新生成」用） */
+  force?: boolean;
 }
 
 /** ensure_release_keystore 返回 */
