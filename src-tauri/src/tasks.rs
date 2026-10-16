@@ -243,16 +243,24 @@ pub fn ensure_release_keystore(
     store_password: String,
     key_password: String,
     envs: HashMap<String, String>,
+    // true = 先删除已存在的密钥库再重建（用当前传入的口令/别名）。
+    // 用于"旧文件口令已忘/与设置不符"的场景；调用方（设置页）需先向用户确认。
+    force: Option<bool>,
 ) -> Result<KeystoreResult, String> {
     let dir = Path::new(&android_app_dir);
     let path = dir.join(&keystore_name);
 
     if path.exists() {
-        return Ok(KeystoreResult {
-            path: path.to_string_lossy().into_owned(),
-            existed: true,
-            created: false,
-        });
+        if force.unwrap_or(false) {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("删除旧密钥库失败 {}：{e}", path.to_string_lossy()))?;
+        } else {
+            return Ok(KeystoreResult {
+                path: path.to_string_lossy().into_owned(),
+                existed: true,
+                created: false,
+            });
+        }
     }
 
     // 定位 keytool：优先 JAVA_HOME/bin，否则 PATH 上的 keytool
