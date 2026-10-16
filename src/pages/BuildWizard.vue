@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref, watch, onUnmounted } from 'vue';
 import { ElMessage } from 'element-plus';
 import { settings } from '../lib/store';
 import { taskRunner, useTaskView } from '../lib/taskRunner';
@@ -218,9 +218,11 @@ const canBuild = computed(() => formValid.value);
 /** 构建页提示：随平台与包类型变化，说明前置条件和产物去向。 */
 const buildHint = computed(() => {
   const kind = release.value ? '正式包' : '调试包';
+  const firstBuild =
+    '首次在一台新机器上构建会先下载 Gradle 分发包与依赖（可能需 5–20 分钟），期间日志可能暂时无输出、并显示「正在下载」，属正常现象，请耐心等待不要关闭窗口。';
   return platform.value === 'harmony'
-    ? `鸿蒙${kind}：需要本机安装 DevEco Studio（目录在「设置」页填写）；子应用模式请先执行 npm run build:base；产物投递到基座 dist/<包名>/`
-    : `安卓${kind}：正式包前请确认 Metro 已停（npm run stop）；子应用模式请先执行 npm run build:base；产物投递到基座 dist/<包名>/，构建后自动计算 SHA-256`;
+    ? `鸿蒙${kind}：需要本机安装 DevEco Studio（目录在「设置」页填写）；子应用模式请先执行 npm run build:base；产物投递到基座 dist/<包名>/。${firstBuild}`
+    : `安卓${kind}：正式包前请确认 Metro 已停（npm run stop）；子应用模式请先执行 npm run build:base；产物投递到基座 dist/<包名>/，构建后自动计算 SHA-256。${firstBuild}`;
 });
 
 async function build() {
@@ -244,6 +246,63 @@ async function install() {
     cwd: settings.value.baseDir,
     envs: settings.value.env,
   });
+}
+
+// ── 构建静默看门狗：gradle 下载分发包 / 依赖时几乎无输出，UI 像卡死。
+//    超过 8 秒没新行就提示「正在下载 / 编译」，并尽量把下载百分比显示出来，
+//    顺便在构建失败时把原因显眼地提示出来（原因其实实时写进了 RNbase/log/build.log）。 ──
+const buildStallMsg = ref('');
+const buildLogPath = computed(() => `${settings.value.baseDir}/log/build.log`);
+let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 最近日志里出现的最大下载百分比（gradlew 用 \r 刷进度，后端已逐帧转发成行）。 */
+const downloadPct = computed<number | null>(() => {
+  const recent = buildLines.value.slice(-40).join('\n');
+  if (!/download|gradle|wrapper|分发包|distribution/i.test(recent)) return null;
+  const nums = [...recent.matchAll(/(\d{1,3})\s*%/g)].map((m) => Number(m[1]));
+  return nums.length ? Math.max(...nums) : null;
+});
+
+function refreshStallWatch() {
+  buildStallMsg.value = '';
+  if (stallTimer) {
+    clearTimeout(stallTimer);
+    stallTimer = null;
+  }
+  if (buildRunning.value) {
+    stallTimer = setTimeout(() => {
+      buildStallMsg.value =
+        downloadPct.value != null
+          ? `正在下载工具链（约 ${downloadPct.value}%，首次构建通常需 5–20 分钟），请耐心等待，不要关闭窗口`
+          : '构建进行中：可能正在下载 Gradle 分发包 / 依赖或编译原生代码（首次构建通常需 5–20 分钟），期间日志可能暂时无输出，属正常现象，请耐心等待';
+    }, 8000);
+  }
+}
+
+watch(() => buildLines.value.length, () => refreshStallWatch());
+watch(buildRunning, (r) => {
+  if (r) refreshStallWatch();
+  else {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = null;
+    buildStallMsg.value = '';
+  }
+});
+onUnmounted(() => {
+  if (stallTimer) clearTimeout(stallTimer);
+});
+
+const buildFailed = computed(() => buildExit.value != null && !buildExit.value.success);
+
+/** 把当前构建日志复制到剪贴板，方便失败后贴给开发 / 自查，避免「没截图」 again。 */
+async function copyBuildLog() {
+  const text = buildLines.value.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success('构建日志已复制到剪贴板');
+  } catch {
+    ElMessage.error('复制失败（浏览器限制），请直接在下方日志面板手动选择复制');
+  }
 }
 
 watch(buildExit, async (e) => {
@@ -474,6 +533,47 @@ watch(buildExit, async (e) => {
         :title="buildHint"
         style="margin: 16px 0"
       />
+
+      <!-- 静默看门狗：构建在跑但 8 秒无新行（典型是 gradle 下载分发包/依赖），提示用户没卡死 -->
+      <el-alert
+        v-if="buildStallMsg"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin: 16px 0"
+      >
+        <template #title>{{ buildStallMsg }}</template>
+        <el-progress
+          :percentage="downloadPct ?? 100"
+          :indeterminate="downloadPct == null"
+          :show-text="downloadPct != null"
+          :duration="downloadPct == null ? 3 : undefined"
+          style="margin-top: 8px; max-width: 460px"
+        />
+      </el-alert>
+
+      <!-- 构建失败：显眼提示，并指明完整日志已写入 log/build.log，支持一键复制 -->
+      <el-alert
+        v-if="buildFailed"
+        type="error"
+        :closable="false"
+        show-icon
+        style="margin: 16px 0"
+      >
+        <template #title>
+          构建失败（exit {{ buildExit?.code ?? '已终止' }}，完整原因已写入
+          <code>{{ buildLogPath }}</code>，也可点下方按钮复制当前日志贴给开发排查）
+        </template>
+        <el-button
+          size="small"
+          type="primary"
+          plain
+          style="margin-top: 8px"
+          @click="copyBuildLog"
+        >
+          复制构建日志
+        </el-button>
+      </el-alert>
 
       <el-card shadow="never">
         <template #header>构建日志</template>
