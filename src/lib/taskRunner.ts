@@ -34,15 +34,42 @@ function notify(): void {
   listeners.forEach((fn) => fn());
 }
 
+/**
+ * 日志通知节流器：把高频 task-line 事件的 notify 合并成每 ~120ms 最多一次。
+ *
+ * 为什么必须节流：notify → 每个 useTaskView 的 tick.value++ → 触发 lines 的
+ * computed 重算（对最多 MAX_LINES=2000 行做 join('\n') + split('\n')）。
+ * gradle release 构建会吐成百上千行，若每行都 notify 一次，就是 O(n²) 的
+ * 字符串拼接，渲染进程直接被打满——表现就是「点开始打包电脑瞬间卡死」。
+ * 这里只合并 UI 刷新，缓冲区写入(pushLine)仍逐行进行，日志不丢、不乱序；
+ * 任务结束(task-exit)会强制 flush 一次，保证收尾立刻可见。
+ */
+let notifyTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleNotify(): void {
+  if (notifyTimer) return;
+  notifyTimer = setTimeout(() => {
+    notifyTimer = null;
+    notify();
+  }, 120);
+}
+/** 立即刷新（并取消待执行的节流），用于任务开始/结束等关键节点。 */
+function flushNotify(): void {
+  if (notifyTimer) {
+    clearTimeout(notifyTimer);
+    notifyTimer = null;
+  }
+  notify();
+}
+
 async function doSubscribe(): Promise<void> {
   await api.onTaskLine((l) => {
     if (buffers.has(l.taskId)) pushLine(l.taskId, l.line);
-    notify();
+    scheduleNotify();
   });
   await api.onTaskExit((e) => {
     running.delete(e.taskId);
     exits.set(e.taskId, e);
-    notify();
+    flushNotify();
   });
 }
 
