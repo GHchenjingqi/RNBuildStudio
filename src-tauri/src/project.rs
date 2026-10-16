@@ -293,3 +293,27 @@ pub fn register_app(base_dir: String, app_name: String, dir: String, dist: Strin
     let body = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
     fs::write(&p, body + "\n").map_err(|e| format!("写入 app-registry.json 失败：{e}"))
 }
+
+/// 写入一份「临时应用身份」配置（免子应用打包用），落到
+/// `<base>/.studio-adhoc/<slug>/app.config.json`，返回该目录的绝对路径。
+///
+/// 场景：用户只想把已经放进基座 `h5/` 的成品 H5 直接打成 APK，不想建子应用工程、
+/// 也不想登记进 app-registry。向导收集的应用名/包名/版本/闪屏等写成一份临时
+/// app.config.json，随后由基座既有脚本 `apply-app-meta.js --app <该目录>` 下发品牌
+/// （apply-app-meta 不写注册表），因此与子应用机制完全解耦。
+#[tauri::command]
+pub fn write_adhoc_config(base_dir: String, slug: String, config: Value) -> Result<String, String> {
+    if slug.is_empty()
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("slug 非法：{slug}（只允许字母/数字/连字符/下划线）"));
+    }
+    let dir = Path::new(&base_dir).join(".studio-adhoc").join(&slug);
+    fs::create_dir_all(&dir).map_err(|e| format!("创建临时应用目录失败 {}：{e}", dir.display()))?;
+    let p = dir.join("app.config.json");
+    let body = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    fs::write(&p, body + "\n").map_err(|e| format!("写入临时配置失败 {}：{e}", p.display()))?;
+    Ok(dir.to_string_lossy().into_owned())
+}

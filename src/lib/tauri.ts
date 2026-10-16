@@ -68,6 +68,9 @@ export const api = {
   /** 把一个已存在的子应用目录登记进注册表（幂等） */
   registerApp: (baseDir: string, appName: string, dir: string, dist: string) =>
     invoke<void>('register_app', { baseDir, appName, dir, dist }),
+  /** 写入免子应用打包用的临时身份配置，返回临时应用目录绝对路径 */
+  writeAdhocConfig: (baseDir: string, slug: string, config: AppConfig) =>
+    invoke<string>('write_adhoc_config', { baseDir, slug, config }),
   /** 注销注册表中的一条记录（清理目录已被删掉的应用） */
   unregisterApp: (baseDir: string, appName: string) =>
     invoke<void>('unregister_app', { baseDir, appName }),

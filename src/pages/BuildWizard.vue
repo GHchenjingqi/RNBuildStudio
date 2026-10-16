@@ -44,7 +44,10 @@ function installArgs(): string[] {
 }
 
 // ── 步骤 2：选模式 + 参数表单 ────────────────────────────────
-const mode = ref<'subapp' | 'remote'>('subapp');
+// subapp = 本地子应用（选已登记应用，产物已同步进 h5/）
+// remote = 远程站点（打包成壳，打开时加载网址）
+// adhoc  = 直接用 h5/ 打包（免子应用：产物已在 h5/，向导内联手填品牌信息直接出包）
+const mode = ref<'subapp' | 'remote' | 'adhoc'>('subapp');
 const apps = ref<string[]>([]);
 const health = ref<Record<string, AppHealth>>({});
 const activeApp = ref('');
@@ -207,8 +210,111 @@ async function runUseSync(name: string) {
   });
 }
 
+// ── 「直接用 h5/ 打包」模式：免子应用，向导内联手填品牌身份 ────────────────
+const isAdhoc = computed(() => mode.value === 'adhoc');
+/** 可选：图标主图（本地 PNG）路径；留空则沿用基座默认图标 */
+const adhocIcon = ref('');
+const adhocPhase = ref<'idle' | 'icon' | 'apply'>('idle');
+const adhocIconTaskId = 'adhoc-icon';
+const adhocApplyTaskId = 'adhoc-apply';
+const { running: adhocIconRunning, exit: adhocIconExit } = useTaskView(ref(adhocIconTaskId));
+const { running: adhocApplyRunning, exit: adhocApplyExit } = useTaskView(ref(adhocApplyTaskId));
+const adhocLines = computed(() =>
+  (adhocPhase.value === 'icon'
+    ? taskRunner.text(adhocIconTaskId)
+    : taskRunner.text(adhocApplyTaskId)
+  ).split('\n'),
+);
+const adhocBusy = computed(
+  () => adhocPhase.value !== 'idle' || adhocIconRunning.value || adhocApplyRunning.value,
+);
+
+/** 临时配置目录名（.studio-adhoc/<slug>）：仅用安装包名收敛成安全字符。 */
+function adhocSlug(): string {
+  const s = (form.value.apkName || form.value.applicationId || 'adhoc').replace(
+    /[^A-Za-z0-9_-]/g,
+    '_',
+  );
+  return s || 'adhoc';
+}
+
+/** 免子应用打包：写临时身份配置 →（可选切图标）→ apply-app-meta 下发品牌。 */
+async function applyAdhocBrand() {
+  if (!formValid.value) {
+    ElMessage.warning('请检查表单：应用名/包名不能为空，包名需为 com.xxx.yyy，版本号为 x.y.z');
+    return;
+  }
+  const slug = adhocSlug();
+  const cfg: AppConfig = { ...form.value, remoteUrl: '' }; // 本地 h5 模式：强制无远程网址
+  let adhocDir: string;
+  try {
+    adhocDir = await api.writeAdhocConfig(settings.value.baseDir, slug, cfg);
+  } catch (e) {
+    ElMessage.error(String(e));
+    return;
+  }
+  const icon = adhocIcon.value.trim();
+  if (icon) {
+    // 有图标：先切五套密度到临时应用目录，再下发品牌
+    adhocPhase.value = 'icon';
+    await taskRunner.start(adhocIconTaskId, {
+      program: settings.value.nodePath,
+      args: ['scripts/gen-brand.js', '--src', icon, '--out', `${adhocDir}/app-brand/android`],
+      cwd: settings.value.baseDir,
+      envs: settings.value.env,
+    });
+  } else {
+    await runAdhocApply(slug);
+  }
+}
+
+async function runAdhocApply(slug: string) {
+  adhocPhase.value = 'apply';
+  await taskRunner.start(adhocApplyTaskId, {
+    program: settings.value.nodePath,
+    args: ['scripts/apply-app-meta.js', '--app', `.studio-adhoc/${slug}`],
+    cwd: settings.value.baseDir,
+    envs: settings.value.env,
+  });
+}
+
+watch(adhocIconExit, (e) => {
+  if (!e || adhocPhase.value !== 'icon') return;
+  if (e.success) {
+    runAdhocApply(adhocSlug());
+  } else {
+    ElMessage.error('图标切密度失败（gen-brand）——请确认是 8bit 非隔行的方形 PNG 主图');
+    adhocPhase.value = 'idle';
+  }
+});
+watch(adhocApplyExit, (e) => {
+  if (!e || adhocPhase.value !== 'apply') return;
+  if (e.success) {
+    ElMessage.success('品牌已按手填信息下发（临时配置）；可进入第 3 步打包，APK 将直接加载基座 h5/ 的代码');
+  } else {
+    ElMessage.error(`品牌下发失败（exit ${e.code ?? '已终止'}）`);
+  }
+  adhocPhase.value = 'idle';
+});
+
+// 进入免子应用模式时把表单复位到手填状态（不残留上一个子应用的配置）
+watch(isAdhoc, (v) => {
+  if (v) {
+    form.value = {
+      appName: '',
+      apkName: '',
+      applicationId: '',
+      versionName: '1.0.0',
+      versionCode: 1,
+      splashBackgroundColor: '#08080D',
+      remoteUrl: '',
+      statusBarStyle: '',
+    };
+  }
+});
+
 watch(selectedApp, async (name) => {
-  if (!name) return;
+  if (!name || isAdhoc.value) return;
   try {
     // 与默认值合并：子应用的 app.config.json 可能缺可选字段（如 statusBarStyle），
     // 直接覆盖会让表单出现 undefined。
@@ -242,9 +348,10 @@ const selectionIsActive = computed(
   () => Boolean(selectedApp.value) && selectedApp.value === activeApp.value
 );
 
-/** 进入构建前的最后一道门：选中项必须已经是当前活动应用，否则打出来的是别人。 */
+/** 进入构建前的最后一道门：选中项必须已经是当前活动应用，否则打出来的是别人。
+ *  免子应用（adhoc）模式没有活动子应用，品牌已在第 2 步按手填信息下发，故跳过此校验。 */
 function nextStep() {
-  if (!selectionIsActive.value) {
+  if (!isAdhoc.value && !selectionIsActive.value) {
     ElMessage.warning(
       `当前打包目标是「${activeApp.value || '未设置'}」，与所选不一致；请先点「保存配置并下发品牌」切换过去`
     );
@@ -465,20 +572,23 @@ watch(buildExit, async (e) => {
     <!-- 步骤 2：模式与参数 -->
     <template v-else-if="step === 1">
       <el-radio-group v-model="mode">
+        <el-radio value="adhoc">直接用 h5/ 打包（免子应用）</el-radio>
         <el-radio value="subapp">本地子应用（用子应用自己的 H5 产物）</el-radio>
         <el-radio value="remote">远程站点（打包成壳，打开时加载网址）</el-radio>
       </el-radio-group>
       <div class="tip" style="margin-top: 8px; max-width: 640px">
         {{
-          mode === 'remote'
-            ? '远程站点不需要 H5 源码：应用启动后直接加载下面填写的网址。'
-            : '本地子应用需要该子应用已执行过「构建并同步到基座」（产物已进基座 h5/）。'
+          mode === 'adhoc'
+            ? '产物已经在基座 h5/ 里（或别人给了一份做好的 H5），直接在这里手填应用名/包名/版本就能出包，不用建子应用、不用登记。'
+            : mode === 'remote'
+              ? '远程站点不需要 H5 源码：应用启动后直接加载下面填写的网址。'
+              : '本地子应用需要该子应用已执行过「构建并同步到基座」（产物已进基座 h5/）。'
         }}
       </div>
 
-      <!-- 悬空记录：目录已被删除 / 改名，留着只会让每一步都失败 -->
+      <!-- 悬空记录：目录已被删除 / 改名，留着只会让每一步都失败（免子应用模式无关） -->
       <el-alert
-        v-if="brokenApps.length"
+        v-if="!isAdhoc && brokenApps.length"
         type="warning"
         :closable="false"
         show-icon
@@ -502,7 +612,7 @@ watch(buildExit, async (e) => {
       </el-alert>
 
       <el-alert
-        v-if="!loadingApps && apps.length && !usableApps.length"
+        v-if="!isAdhoc && !loadingApps && apps.length && !usableApps.length"
         type="error"
         :closable="false"
         show-icon
@@ -511,7 +621,7 @@ watch(buildExit, async (e) => {
       />
 
       <el-form label-width="150px" style="max-width: 640px; margin-top: 20px">
-        <el-form-item label="应用">
+        <el-form-item v-if="!isAdhoc" label="应用">
           <el-select v-model="selectedApp" :loading="loadingApps" style="width: 100%">
             <el-option
               v-for="name in apps"
@@ -527,7 +637,7 @@ watch(buildExit, async (e) => {
             </el-button>
           </div>
           <div class="tip">
-            品牌 / 版本 / 网址都存在这个应用的 app.config.json 里，两种模式都要选一个；
+            品牌 / 版本 / 网址都存在这个应用的 app.config.json 里，这两种模式都要选一个；
             想要一个全新的应用，请到「新建子应用」页创建；已有子应用工程（在基座同级目录、
             含 app.config.json）可直接点上方「选择已有子应用目录」登记进来。
             保存配置时会同时把它设为「当前活动应用」——构建脚本只认活动应用
@@ -555,7 +665,17 @@ watch(buildExit, async (e) => {
           <el-color-picker v-model="form.splashBackgroundColor" />
           <span style="margin-left: 12px">{{ form.splashBackgroundColor }}</span>
         </el-form-item>
-        <el-form-item label="远程地址（网站地址）">
+        <el-form-item v-if="isAdhoc" label="图标主图（可选）">
+          <el-input
+            v-model="adhocIcon"
+            placeholder="本地 PNG 路径，如 D:/codes/logo.png（留空用基座默认图标）"
+            style="width: 420px"
+          />
+          <div class="tip">
+            填一张 8bit 非隔行的方形 PNG（≥1024），会自动切出五套密度作为 App 图标与闪屏 logo。
+          </div>
+        </el-form-item>
+        <el-form-item v-if="!isAdhoc" label="远程地址（网站地址）">
           <el-input
             v-model="form.remoteUrl"
             placeholder="https://…（留空 = 加载子应用本地产物）"
@@ -642,13 +762,37 @@ watch(buildExit, async (e) => {
 
       <el-space>
         <el-button @click="step = 0">上一步</el-button>
-        <el-button type="primary" :loading="saving || applyRunning" :disabled="!canBuild" @click="saveAndApply">
+        <el-button
+          v-if="isAdhoc"
+          type="primary"
+          :loading="adhocBusy"
+          :disabled="!canBuild"
+          @click="applyAdhocBrand"
+        >
+          生成配置并下发品牌
+        </el-button>
+        <el-button
+          v-else
+          type="primary"
+          :loading="saving || applyRunning"
+          :disabled="!canBuild"
+          @click="saveAndApply"
+        >
           保存配置并下发品牌
         </el-button>
-        <el-button :disabled="!applyExit?.success" @click="nextStep">下一步</el-button>
+        <el-button
+          :disabled="isAdhoc ? !adhocApplyExit?.success : !applyExit?.success"
+          @click="nextStep"
+        >
+          下一步
+        </el-button>
       </el-space>
 
-      <el-card v-if="applyLines.length" shadow="never" style="margin-top: 16px">
+      <el-card v-if="isAdhoc && adhocLines.length" shadow="never" style="margin-top: 16px">
+        <template #header>免子应用打包日志（写临时配置 / 切图标 / 下发品牌）</template>
+        <pre class="log">{{ adhocLines.join('\n') }}</pre>
+      </el-card>
+      <el-card v-else-if="applyLines.length" shadow="never" style="margin-top: 16px">
         <template #header>品牌下发日志</template>
         <pre class="log">{{ applyLines.join('\n') }}</pre>
       </el-card>
@@ -671,8 +815,8 @@ watch(buildExit, async (e) => {
         </div>
       </div>
       <div class="tip" style="margin-bottom: 16px">
-        本次打包目标：<b>{{ activeApp || '（未设置）' }}</b>
-        <span v-if="selectedApp && selectedApp !== activeApp" class="tip-error">
+        本次打包目标：<b>{{ isAdhoc ? '临时配置（直接用基座 h5/）' : activeApp || '（未设置）' }}</b>
+        <span v-if="!isAdhoc && selectedApp && selectedApp !== activeApp" class="tip-error">
           （与第 2 步所选「{{ selectedApp }}」不一致，请返回第 2 步重新保存配置）
         </span>
       </div>
