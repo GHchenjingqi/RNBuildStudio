@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { saveSettings, settings } from '../lib/store';
 import { api } from '../lib/tauri';
@@ -9,6 +9,7 @@ const draft = reactive({
   baseDir: settings.value.baseDir,
   nodePath: settings.value.nodePath,
   env: { ...settings.value.env } as Record<string, string>,
+  signing: { ...settings.value.signing },
 });
 
 const valid = ref<boolean | null>(null);
@@ -36,8 +37,47 @@ function save() {
   for (const [k, v] of Object.entries(draft.env)) {
     if (v && v.trim()) env[k] = v.trim();
   }
-  saveSettings({ baseDir: draft.baseDir.trim(), nodePath: draft.nodePath.trim() || 'node', env });
+  saveSettings({
+    baseDir: draft.baseDir.trim(),
+    nodePath: draft.nodePath.trim() || 'node',
+    env,
+    signing: { ...draft.signing },
+  });
   ElMessage.success('设置已保存');
+}
+
+// 安卓正式包签名：缺密钥库时一键生成（也供用户提前校验 / 重新生成）
+const keystoreBusy = ref(false);
+const keystoreMsg = ref('');
+const keystorePath = computed(() => {
+  const d = draft.baseDir.trim();
+  const n = (draft.signing.keystoreName || '').trim();
+  return n ? `${d}/platforms/android/app/${n}` : '';
+});
+async function genKeystore() {
+  if (!keystorePath.value) {
+    ElMessage.warning('请先填写密钥库文件名');
+    return;
+  }
+  keystoreBusy.value = true;
+  keystoreMsg.value = '';
+  try {
+    const r = await api.ensureReleaseKeystore({
+      androidAppDir: `${draft.baseDir.trim()}/platforms/android/app`,
+      keystoreName: draft.signing.keystoreName.trim() || 'QUX-release.keystore',
+      alias: draft.signing.alias.trim() || 'qux',
+      storePassword: draft.signing.storePassword,
+      keyPassword: draft.signing.keyPassword,
+      envs: draft.env,
+    });
+    keystoreMsg.value = r.existed ? '密钥库已存在，无需重新生成' : `已生成密钥库：${r.path}`;
+    ElMessage.success(keystoreMsg.value);
+  } catch (e) {
+    keystoreMsg.value = String(e);
+    ElMessage.error(String(e));
+  } finally {
+    keystoreBusy.value = false;
+  }
 }
 </script>
 
@@ -68,6 +108,48 @@ function save() {
       <el-form-item v-for="item in ENV_PRESETS" :key="item.key" :label="item.key">
         <el-input v-model="draft.env[item.key]" placeholder="可选" />
         <div class="tip">{{ item.desc }}</div>
+      </el-form-item>
+
+      <el-divider content-position="left">安卓正式包签名</el-divider>
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 16px"
+        title="生产发布务必替换为自有密钥库并妥善备份：丢失该文件将无法再为同一应用发布更新"
+      />
+      <el-form-item label="密钥库文件名">
+        <el-input v-model="draft.signing.keystoreName" placeholder="QUX-release.keystore" />
+        <div class="tip">
+          落在 &lt;基座&gt;/platforms/android/app/ 下；被 *.keystore 规则忽略、不随仓库同步。
+          构建正式包时若此文件不存在，打包器会用 keytool 自动生成（需本机 JDK / JAVA_HOME）
+        </div>
+      </el-form-item>
+      <el-form-item label="密钥别名">
+        <el-input v-model="draft.signing.alias" placeholder="qux" />
+      </el-form-item>
+      <el-form-item label="密钥库口令">
+        <el-input
+          v-model="draft.signing.storePassword"
+          type="password"
+          show-password
+          placeholder="android"
+        />
+      </el-form-item>
+      <el-form-item label="密钥口令">
+        <el-input
+          v-model="draft.signing.keyPassword"
+          type="password"
+          show-password
+          placeholder="android"
+        />
+      </el-form-item>
+      <el-form-item label="密钥库路径">
+        <el-input :model-value="keystorePath" readonly />
+        <div class="tip">解析后的绝对路径；点下方按钮可立即生成 / 校验</div>
+      </el-form-item>
+      <el-form-item>
+        <el-button :loading="keystoreBusy" @click="genKeystore">立即生成 / 校验密钥库</el-button>
       </el-form-item>
 
       <el-form-item>

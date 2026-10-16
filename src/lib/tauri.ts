@@ -11,10 +11,31 @@ export interface RunTaskOptions {
   envs: Record<string, string>;
 }
 
+/** ensure_release_keystore 入参 */
+export interface EnsureKeystoreOptions {
+  [key: string]: unknown;
+  androidAppDir: string;
+  keystoreName: string;
+  alias: string;
+  storePassword: string;
+  keyPassword: string;
+  envs: Record<string, string>;
+}
+
+/** ensure_release_keystore 返回 */
+export interface KeystoreResult {
+  path: string;
+  existed: boolean;
+  created: boolean;
+}
+
 export const api = {
   /** 启动基座脚本任务（日志走 task-line / task-exit 事件流） */
   runTask: (opts: RunTaskOptions) => invoke<void>('run_task', opts),
   stopTask: (taskId: string) => invoke<void>('stop_task', { taskId }),
+  /** 确保安卓 release 签名密钥库存在（缺则自动用 keytool 生成），返回路径与状态 */
+  ensureReleaseKeystore: (opts: EnsureKeystoreOptions) =>
+    invoke<KeystoreResult>('ensure_release_keystore', opts),
   listApps: (baseDir: string) => invoke<AppRegistry>('list_apps', { baseDir }),
   /** 注销注册表中的一条记录（清理目录已被删掉的应用） */
   unregisterApp: (baseDir: string, appName: string) =>
