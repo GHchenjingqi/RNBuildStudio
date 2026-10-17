@@ -1,3 +1,4 @@
+mod brand;
 mod project;
 mod tasks;
 
@@ -17,7 +18,9 @@ pub fn run() {
             project::validate_base_dir,
             project::scan_subapps,
             project::register_app,
-            project::write_adhoc_config
+            project::write_adhoc_config,
+            brand::pick_image,
+            brand::import_brand_images
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

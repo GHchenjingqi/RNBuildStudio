@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch, onUnmounted } from 'vue';
 import { ElMessage } from 'element-plus';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { settings } from '../lib/store';
 import { taskRunner, useTaskView } from '../lib/taskRunner';
-import { api } from '../lib/tauri';
+import { api, type BrandImportResult } from '../lib/tauri';
 import type { AppConfig, AppHealth, DiscoveredSubapp } from '../types';
 
 const step = ref(0);
@@ -214,22 +215,94 @@ async function runUseSync(name: string) {
 
 // ── 「直接用 h5/ 打包」模式：免子应用，向导内联手填品牌身份 ────────────────
 const isAdhoc = computed(() => mode.value === 'adhoc');
-/** 可选：图标主图（本地 PNG）路径；留空则沿用基座默认图标 */
-const adhocIcon = ref('');
-const adhocPhase = ref<'idle' | 'icon' | 'apply'>('idle');
-const adhocIconTaskId = 'adhoc-icon';
+const adhocPhase = ref<'idle' | 'apply'>('idle');
 const adhocApplyTaskId = 'adhoc-apply';
-const { running: adhocIconRunning, exit: adhocIconExit } = useTaskView(ref(adhocIconTaskId));
 const { running: adhocApplyRunning, exit: adhocApplyExit } = useTaskView(ref(adhocApplyTaskId));
-const adhocLines = computed(() =>
-  (adhocPhase.value === 'icon'
-    ? taskRunner.text(adhocIconTaskId)
-    : taskRunner.text(adhocApplyTaskId)
-  ).split('\n'),
-);
 const adhocBusy = computed(
-  () => adhocPhase.value !== 'idle' || adhocIconRunning.value || adhocApplyRunning.value,
+  () => adhocPhase.value !== 'idle' || adhocApplyRunning.value || brandGenRunning.value,
 );
+
+// ── 品牌图（图标 / 闪屏主图）：两种模式通用 ─────────────────
+// 留空 = 不改动（子应用沿用已有品牌，免子应用沿用基座默认图标）。
+// 选取走原生文件对话框：WebView 的 <input type=file> 出于安全拿不到真实路径，
+// 而切图脚本与缩略图预览都需要绝对路径。
+const brandIcon = ref('');
+const brandSplash = ref('');
+/** 闪屏主图必须与图标主图一起给：gen-brand 的 --src（图标）是必填主图，缺它无法切图 */
+const brandValid = computed(() => !(brandSplash.value.trim() && !brandIcon.value.trim()));
+const brandIconSrc = computed(() =>
+  brandIcon.value.trim() ? convertFileSrc(brandIcon.value.trim()) : '',
+);
+const brandSplashSrc = computed(() =>
+  brandSplash.value.trim() ? convertFileSrc(brandSplash.value.trim()) : '',
+);
+
+async function pickBrandImage(kind: 'icon' | 'splash') {
+  const picked = await api.pickImage(
+    kind === 'icon' ? '选择图标主图（方形 PNG，≥1024）' : '选择闪屏主图（PNG）',
+  );
+  if (!picked) return;
+  if (kind === 'icon') brandIcon.value = picked;
+  else brandSplash.value = picked;
+}
+
+function clearBrandImage(kind: 'icon' | 'splash') {
+  if (kind === 'icon') brandIcon.value = '';
+  else brandSplash.value = '';
+}
+
+/** 品牌切图任务：主图导入 app-brand/ 后跑基座 scripts/gen-brand.js 切五档密度。
+ *  真源（icon.png / splash.png）与产物（app-brand/android/）都落在应用目录里，
+ *  之后用户仍可手工 npm run brand:gen 重切，与 CLI 完全同源。 */
+const brandGenTaskId = 'brand-gen';
+const { running: brandGenRunning, exit: brandGenExit } = useTaskView(ref(brandGenTaskId));
+
+/** 切图成功后的续跑动作：adhoc → 下发临时品牌；subapp → use-app.js 切活动 + 下发 */
+type PendingAfterGen = { kind: 'adhoc'; slug: string } | { kind: 'subapp' } | null;
+const pendingAfterGen = ref<PendingAfterGen>(null);
+
+function brandGenArgs(dir: string, withSplash: boolean): string[] {
+  return [
+    'scripts/gen-brand.js',
+    '--src',
+    `${dir}/app-brand/icon.png`,
+    ...(withSplash ? ['--splash', `${dir}/app-brand/splash.png`] : []),
+    '--out',
+    `${dir}/app-brand/android`,
+  ];
+}
+
+/** 导入主图（本地快速拷贝，直接 await）→ 启动切图任务；续跑交给 brandGenExit watcher。 */
+async function importAndGen(dir: string, pending: Exclude<PendingAfterGen, null>): Promise<boolean> {
+  let imported: BrandImportResult;
+  try {
+    imported = await api.importBrandImages(dir, brandIcon.value.trim(), brandSplash.value.trim());
+  } catch (e) {
+    ElMessage.error(String(e));
+    return false;
+  }
+  pendingAfterGen.value = pending;
+  await taskRunner.start(brandGenTaskId, {
+    program: settings.value.nodePath,
+    args: brandGenArgs(dir, imported.splash),
+    cwd: settings.value.baseDir,
+    envs: settings.value.env,
+  });
+  return true;
+}
+
+watch(brandGenExit, (e) => {
+  const pending = pendingAfterGen.value;
+  if (!e || !pending) return;
+  pendingAfterGen.value = null;
+  if (!e.success) {
+    ElMessage.error('品牌图切密度失败（gen-brand）——请确认主图是 8bit 非隔行 PNG，图标主图需为方形');
+    adhocPhase.value = 'idle';
+    return;
+  }
+  if (pending.kind === 'adhoc') void runAdhocApply(pending.slug);
+  else void runApplyTask();
+});
 
 /** 临时配置目录名（.studio-adhoc/<slug>）：仅用安装包名收敛成安全字符。 */
 function adhocSlug(): string {
@@ -240,10 +313,14 @@ function adhocSlug(): string {
   return s || 'adhoc';
 }
 
-/** 免子应用打包：写临时身份配置 →（可选切图标）→ apply-app-meta 下发品牌。 */
+/** 免子应用打包：写临时身份配置 →（可选导入品牌图并切密度）→ apply-app-meta 下发品牌。 */
 async function applyAdhocBrand() {
   if (!formValid.value) {
     ElMessage.warning('请检查表单：应用名/包名不能为空，包名需为 com.xxx.yyy，版本号为 x.y.z');
+    return;
+  }
+  if (!brandValid.value) {
+    ElMessage.warning('上传闪屏主图时需同时设置图标主图');
     return;
   }
   const slug = adhocSlug();
@@ -255,19 +332,15 @@ async function applyAdhocBrand() {
     ElMessage.error(String(e));
     return;
   }
-  const icon = adhocIcon.value.trim();
-  if (icon) {
-    // 有图标：先切五套密度到临时应用目录，再下发品牌
-    adhocPhase.value = 'icon';
-    await taskRunner.start(adhocIconTaskId, {
-      program: settings.value.nodePath,
-      args: ['scripts/gen-brand.js', '--src', icon, '--out', `${adhocDir}/app-brand/android`],
-      cwd: settings.value.baseDir,
-      envs: settings.value.env,
-    });
-  } else {
-    await runAdhocApply(slug);
+  const wantsBrand = Boolean(brandIcon.value.trim() || brandSplash.value.trim());
+  if (wantsBrand) {
+    adhocPhase.value = 'apply'; // 切图期间撑住按钮 loading（adhocBusy 还算了 brandGenRunning）
+    const started = await importAndGen(adhocDir, { kind: 'adhoc', slug });
+    if (started) return; // 续跑（下发品牌）由 brandGenExit watcher 接力
+    adhocPhase.value = 'idle';
+    return;
   }
+  await runAdhocApply(slug);
 }
 
 async function runAdhocApply(slug: string) {
@@ -280,15 +353,6 @@ async function runAdhocApply(slug: string) {
   });
 }
 
-watch(adhocIconExit, (e) => {
-  if (!e || adhocPhase.value !== 'icon') return;
-  if (e.success) {
-    runAdhocApply(adhocSlug());
-  } else {
-    ElMessage.error('图标切密度失败（gen-brand）——请确认是 8bit 非隔行的方形 PNG 主图');
-    adhocPhase.value = 'idle';
-  }
-});
 watch(adhocApplyExit, (e) => {
   if (!e || adhocPhase.value !== 'apply') return;
   if (e.success) {
@@ -301,6 +365,9 @@ watch(adhocApplyExit, (e) => {
 
 // 进入免子应用模式时把表单复位到手填状态（不残留上一个子应用的配置）
 watch(isAdhoc, (v) => {
+  // 换模式就清空品牌图选择：主图是「针对某个目标应用」选的，跨模式残留会下发给错误目标
+  brandIcon.value = '';
+  brandSplash.value = '';
   if (v) {
     form.value = {
       appName: '',
@@ -317,6 +384,9 @@ watch(isAdhoc, (v) => {
 
 watch(selectedApp, async (name) => {
   if (!name || isAdhoc.value) return;
+  // 换应用就清空品牌图选择，避免把上一个应用选的主图下发给新目标
+  brandIcon.value = '';
+  brandSplash.value = '';
   try {
     // 与默认值合并：子应用的 app.config.json 可能缺可选字段（如 statusBarStyle），
     // 直接覆盖会让表单出现 undefined。
@@ -362,34 +432,63 @@ function nextStep() {
   step.value = 2;
 }
 
-/** 保存 app.config.json（真源）→ 切换为当前活动应用并下发品牌（派生产物由脚本生成） */
+/** 跑 use-app.js <name>：写注册表 activeApp + 下发品牌（applyTaskId，日志走 applyLines） */
+async function runApplyTask() {
+  // 走 use-app.js 而不是直接 apply-app-meta.js：前者在写 busy 之前会先把 selectedApp
+  // 写进注册表的 activeApp。构建脚本只认 activeApp，少了这一步就会「选了 A 却打出 B」。
+  await taskRunner.start(applyTaskId, {
+    program: settings.value.nodePath,
+    args: ['scripts/use-app.js', selectedApp.value],
+    cwd: settings.value.baseDir,
+    envs: settings.value.env,
+  });
+  activeApp.value = selectedApp.value;
+}
+
+/** 保存 app.config.json（真源）→（可选导入品牌图并切密度）→ 切换为当前活动应用并下发品牌 */
 async function saveAndApply() {
   if (!formValid.value) {
     ElMessage.warning('请检查表单：包名需为 com.xxx.yyy，版本号为 x.y.z，安装包文件名不能含网址字符');
     return;
   }
+  if (!brandValid.value) {
+    ElMessage.warning('上传闪屏主图时需同时设置图标主图');
+    return;
+  }
   saving.value = true;
   try {
     await api.writeAppConfig(settings.value.baseDir, selectedApp.value, form.value);
-    // 走 use-app.js 而不是直接 apply-app-meta.js：前者在写 busy 之前会先把 selectedApp
-    // 写进注册表的 activeApp。构建脚本只认 activeApp，少了这一步就会「选了 A 却打出 B」。
-    await taskRunner.start(applyTaskId, {
-      program: settings.value.nodePath,
-      args: ['scripts/use-app.js', selectedApp.value],
-      cwd: settings.value.baseDir,
-      envs: settings.value.env,
-    });
-    activeApp.value = selectedApp.value;
+    const wantsBrand = Boolean(brandIcon.value.trim() || brandSplash.value.trim());
+    if (wantsBrand) {
+      // 应用目录绝对路径来自 list_apps 附带的体检结果；拿不到就没法定位 app-brand/
+      const appDir = health.value[selectedApp.value]?.dir;
+      if (!appDir) {
+        ElMessage.error('拿不到该应用的目录位置，无法导入品牌图；请重新选择应用后重试');
+        return;
+      }
+      // 主图导入 + 切密度任务已启动，后续（切活动 + 下发品牌）由 brandGenExit watcher 接力
+      await importAndGen(appDir, { kind: 'subapp' });
+      return;
+    }
+    await runApplyTask();
     ElMessage.success(`配置已保存到「${selectedApp.value}」，并已设为当前活动应用（构建将打它）`);
   } catch (e) {
     ElMessage.error(String(e));
   } finally {
-    // 必须无条件复位：按钮 loading = saving || applyRunning，saving 原先只写在 catch 里，
-    // 成功路径永不复位 → 明明已提示保存成功，按钮却一直转圈。
-    // 任务真正在跑时由 applyRunning 撑住 loading，任务结束自动停。
+    // 必须无条件复位：按钮 loading = saving || applyRunning || brandGenRunning，saving 原先
+    // 只写在 catch 里，成功路径永不复位 → 明明已提示保存成功，按钮却一直转圈。
+    // 任务真正在跑时由 applyRunning / brandGenRunning 撑住 loading，任务结束自动停。
     saving.value = false;
   }
 }
+
+/** 第 2 步日志面板：切图（gen-brand）与品牌下发（use-app / apply-app-meta）两段日志拼一起 */
+const brandLogLines = computed(() => {
+  const gen = taskRunner.text(brandGenTaskId);
+  const apply = isAdhoc.value ? taskRunner.text(adhocApplyTaskId) : taskRunner.text(applyTaskId);
+  const merged = [gen, apply].filter(Boolean).join('\n');
+  return merged ? merged.split('\n') : [];
+});
 
 // ── 步骤 3：构建 ─────────────────────────────────────────────
 const buildTaskId = 'build';
@@ -664,15 +763,47 @@ watch(buildExit, async (e) => {
           <el-color-picker v-model="form.splashBackgroundColor" />
           <span style="margin-left: 12px">{{ form.splashBackgroundColor }}</span>
         </el-form-item>
-        <el-form-item v-if="isAdhoc" label="图标主图（可选）">
-          <el-input
-            v-model="adhocIcon"
-            placeholder="本地 PNG 路径，如 D:/codes/logo.png（留空用基座默认图标）"
-            style="width: 420px"
-          />
-          <div class="tip">
-            填一张 8bit 非隔行的方形 PNG（≥1024），会自动切出五套密度作为 App 图标与闪屏 logo。
+        <el-form-item label="桌面图标（可选）">
+          <div class="brand-row">
+            <img v-if="brandIconSrc" :src="brandIconSrc" class="brand-thumb" alt="图标预览" />
+            <span v-else class="brand-thumb brand-thumb-empty"></span>
+            <el-input
+              v-model="brandIcon"
+              placeholder="点「选择图片」选取 PNG 主图；留空沿用基座默认图标"
+              style="flex: 1"
+              clearable
+            />
+            <el-button :disabled="taskRunner.anyRunning.value" @click="pickBrandImage('icon')">
+              选择图片…
+            </el-button>
+            <el-button v-if="brandIcon" text @click="clearBrandImage('icon')">清除</el-button>
           </div>
+          <div class="tip">
+            一张图自动生成全部尺寸：建议 ≥1024 的方形 PNG，保存配置时自动切出 5 档密度的桌面图标
+            （方形圆角 + 圆形）与闪屏 logo，无需再手跑 npm run brand:gen
+          </div>
+        </el-form-item>
+        <el-form-item label="闪屏图片（可选）">
+          <div class="brand-row">
+            <img v-if="brandSplashSrc" :src="brandSplashSrc" class="brand-thumb" alt="闪屏预览" />
+            <span v-else class="brand-thumb brand-thumb-empty"></span>
+            <el-input
+              v-model="brandSplash"
+              placeholder="点「选择图片」选取 PNG 主图；留空则闪屏只显示底色 + 图标 logo"
+              style="flex: 1"
+              clearable
+            />
+            <el-button :disabled="taskRunner.anyRunning.value" @click="pickBrandImage('splash')">
+              选择图片…
+            </el-button>
+            <el-button v-if="brandSplash" text @click="clearBrandImage('splash')">清除</el-button>
+          </div>
+          <div class="tip">
+            一张图适配所有屏幕：自动切出各密度闪屏 logo（原生启动窗口居中显示在「闪屏底色」上），
+            并作为启动后 3 秒倒计时闪屏（全屏裁切显示）。方形图会做圆角处理，长方形图按比例完整显示，
+            建议上传竖版长方形图；需与桌面图标一起设置
+          </div>
+          <div v-if="!brandValid" class="tip-error">上传闪屏图片前，请先设置上方的桌面图标主图</div>
         </el-form-item>
         <el-form-item v-if="!isAdhoc" label="远程地址（网站地址）">
           <el-input
@@ -751,10 +882,10 @@ watch(buildExit, async (e) => {
       </el-dialog>
 
       <el-alert
-        type="warning"
+        type="info"
         :closable="false"
         show-icon
-        title="图标 / 闪屏请把主图放到子应用 app-brand/icon.png（≥1024 方图），用基座 npm run brand:gen 生成五套密度；MVP 暂不内置切图"
+        title="在上方选择图标 / 闪屏主图后，点「保存配置并下发品牌」会自动切出全部密度的桌面图标与闪屏图；不选则沿用应用现有品牌。主图与切图产物都保存在应用的 app-brand/ 目录，之后也可手工 npm run brand:gen 重切"
         style="max-width: 640px; margin-bottom: 16px"
       />
 
@@ -772,7 +903,7 @@ watch(buildExit, async (e) => {
         <el-button
           v-else
           type="primary"
-          :loading="saving || applyRunning"
+          :loading="saving || applyRunning || brandGenRunning"
           :disabled="!canBuild"
           @click="saveAndApply"
         >
@@ -786,13 +917,11 @@ watch(buildExit, async (e) => {
         </el-button>
       </el-space>
 
-      <el-card v-if="isAdhoc && adhocLines.length" shadow="never" style="margin-top: 16px">
-        <template #header>免子应用打包日志（写临时配置 / 切图标 / 下发品牌）</template>
-        <pre class="log">{{ adhocLines.join('\n') }}</pre>
-      </el-card>
-      <el-card v-else-if="applyLines.length" shadow="never" style="margin-top: 16px">
-        <template #header>品牌下发日志</template>
-        <pre class="log">{{ applyLines.join('\n') }}</pre>
+      <el-card v-if="brandLogLines.length" shadow="never" style="margin-top: 16px">
+        <template #header>{{
+          isAdhoc ? '免子应用打包日志（切图 / 写临时配置 / 下发品牌）' : '切图 / 品牌下发日志'
+        }}</template>
+        <pre class="log">{{ brandLogLines.join('\n') }}</pre>
       </el-card>
     </template>
 
@@ -941,6 +1070,30 @@ watch(buildExit, async (e) => {
   line-height: 1.6;
   color: var(--el-color-danger);
   margin-top: 4px;
+}
+
+/* 品牌图行：缩略图 + 路径输入 + 选择/清除按钮 */
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+/* 主图缩略图：无图时显示灰色占位块，占位与图片同尺寸避免行高跳动 */
+.brand-thumb {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 6px;
+  border: 1px solid var(--el-border-color);
+  object-fit: cover;
+  background: #fff;
+}
+
+.brand-thumb-empty {
+  display: inline-block;
+  background: var(--el-fill-color-light);
 }
 
 /* 悬空记录列表：一行一个，名字 + 路径 + 移除按钮 */

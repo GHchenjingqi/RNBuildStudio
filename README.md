@@ -26,6 +26,7 @@ Tauri 2 + Vue3 + Element Plus 的桌面打包工具，面向不懂代码的使�
 - **新建应用**：三种类型——Vue 3 工程 / React 18 工程 / **仅配置（远程站点）**。调基座 `scripts/create-subapp.js` 在基座同级目录创建（复制模板 + 补齐 `scripts/` 三个对接脚本 + 写 `app.config.json` + 登记 `app-registry.json`；「仅配置」类型只写 `app.config.json` + `app-brand/`，无源码）。建好后可点「安装依赖」「构建并同步到基座」「设为当前应用」——仅配置类型只需最后一步
   - 子应用侧的 npm 命令以 `node <node_modules/npm/bin/npm-cli.js>` 方式执行：Windows 下 Rust 的 `Command` 不能直接跑 `npm.cmd`（不是 PE 可执行文件），且不经 `cmd` 可避免编码问题
 - **参数可编辑**：打包向导里的应用名 / 包名 / 安装包文件名 / 版本 / 闪屏底色均可修改，保存即写回**所选应用**的 `app.config.json`；安装包文件名与远程地址带格式校验（前者会变成产物文件名，不能填网址）
+- **图标 / 闪屏可视化配置**（子应用与免子应用模式通用）：向导内点「选择图片」弹原生文件框选 PNG 主图（带缩略图预览），保存时自动把主图拷成应用品牌真源（`<应用>/app-brand/icon.png|splash.png`）并调基座 `scripts/gen-brand.js` 切出全部密度——图标出 5 档 `mipmap`（方形圆角 + 圆形），闪屏出 5 档 `drawable/splash_logo`（方形做圆角、长方形保比例适配），原生启动窗口居中叠加在闪屏底色上；同时基座 `apply-app-meta.js` 会把闪屏主图拷进 RN 侧作为**启动后 3 秒倒计时闪屏**（`SplashOverlay` 动态加载，未配置回落默认闪图）。不选则沿用应用现有品牌；主图落盘后仍可手工 `npm run brand:gen` 重切，与 CLI 完全同源
 - **打包目标强绑定**：保存配置走的是 `scripts/use-app.js`（而非直接 `apply-app-meta.js`），它会把所选应用写进注册表的 `activeApp`。`gradle.js` / `hvigor.js` 只认 `activeApp`，少了这一步会出现「选了 A 却打出 B」。进入构建前若选中项 ≠ activeApp 会被拦下并提示
 - **悬空记录体检**：`list_apps` 会顺带回传每个应用的健康状态（目录 / `app.config.json` 是否还在）。删掉目录却在注册表留记录时，向导不再报错崩溃，而是把该项标灰并提示「从注册表移除」（`unregister_app` 命令，只改 `app-registry.json`，若它正好是 activeApp 则一并清空）
 - **环境自检**：一键跑基座 `doctor.js`，三平台红绿灯 + 完整日志

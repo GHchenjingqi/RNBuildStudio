@@ -19,9 +19,12 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 原生文件选择对话框（图标/闪屏主图上传）。WebView 的 <input type=file> 拿不到真实路径，
+# 而切图与预览都需要绝对路径，所以必须走原生对话框。
+rfd = "0.15"
 
 [profile.release]
 strip = true

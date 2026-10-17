@@ -52,6 +52,13 @@ export interface KeystoreVerify {
   message: string;
 }
 
+/** import_brand_images 返回：哪些主图真正被拷贝进了 app-brand/ */
+export interface BrandImportResult {
+  brandDir: string;
+  icon: boolean;
+  splash: boolean;
+}
+
 export const api = {
   /** 启动基座脚本任务（日志走 task-line / task-exit 事件流） */
   runTask: (opts: RunTaskOptions) => invoke<void>('run_task', opts),
@@ -82,6 +89,15 @@ export const api = {
   detectBaseDir: () => invoke<string>('detect_base_dir'),
   /** 校验目录是否为合法基座 */
   validateBaseDir: (path: string) => invoke<boolean>('validate_base_dir', { path }),
+  /** 弹原生文件框选一张 PNG 主图（取消返回 null）。WebView 拿不到真实路径，必须走原生对话框 */
+  pickImage: (title: string) => invoke<string | null>('pick_image', { title }),
+  /** 把选中的图标/闪屏主图拷成应用品牌真源（<targetDir>/app-brand/icon.png|splash.png） */
+  importBrandImages: (targetDir: string, iconPath: string, splashPath: string) =>
+    invoke<BrandImportResult>('import_brand_images', {
+      targetDir,
+      iconPath: iconPath || null,
+      splashPath: splashPath || null,
+    }),
   onTaskLine: (cb: (l: TaskLine) => void): Promise<UnlistenFn> =>
     listen<TaskLine>('task-line', (e) => cb(e.payload)),
   onTaskExit: (cb: (e: TaskExit) => void): Promise<UnlistenFn> =>
